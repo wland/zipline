@@ -84,8 +84,10 @@ class TradingEnvironment(object):
         self.first_trading_day = next(self.trading_day_map.iterkeys())
         self.last_trading_day = next(reversed(self.trading_day_map))
 
+        ''' this day is about mid december, but live trade is now and future ! ----------------------------------
         assert self.period_start <= self.last_trading_day, \
             "Period start falls after the last known trading day."
+        '''
         assert self.period_end >= self.first_trading_day, \
             "Period end falls before the first known trading day."
 
@@ -108,8 +110,14 @@ class TradingEnvironment(object):
         first_open = self.period_start
         one_day = datetime.timedelta(days=1)
 
-        while not self.is_trading_day(first_open):
-            first_open = first_open + one_day
+        try:
+            #while first_open.isoweekday() > 5:
+            while not self.is_trading_day(first_open):
+                first_open = first_open + one_day
+        except:
+            import ipdb as pdb
+            pdb.set_trace()
+            first_open = datetime.date.today()
 
         first_open = self.set_NYSE_time(first_open, 9, 30)
         return first_open

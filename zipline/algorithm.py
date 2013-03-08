@@ -23,7 +23,12 @@ from datetime import datetime
 from itertools import groupby
 from operator import attrgetter
 
+import sys
+import os
+sys.path.append(os.environ['QTRADE'])
+from neuronquant.data.ziplinesource import DataLiveSource
 from zipline.sources import DataFrameSource, DataPanelSource
+
 from zipline.utils.factory import create_trading_environment
 from zipline.transforms.utils import StatefulTransform
 from zipline.finance.slippage import (
@@ -172,6 +177,9 @@ class TradingAlgorithm(object):
         elif isinstance(source, pd.DataFrame):
             # if DataFrame provided, wrap in DataFrameSource
             source = DataFrameSource(source)
+        elif isinstance(source, dict):
+            assert start is not None and end is not None
+            source = DataLiveSource(source, start=start, end=end)
         elif isinstance(source, pd.Panel):
             source = DataPanelSource(source)
 
@@ -212,9 +220,7 @@ class TradingAlgorithm(object):
         perfs = list(self.gen)
 
         # convert perf ndict to pandas dataframe
-        daily_stats = self._create_daily_stats(perfs)
-
-        return daily_stats
+        return self._create_daily_stats(perfs)
 
     def _create_daily_stats(self, perfs):
         # create daily and cumulative stats dataframe
@@ -230,7 +236,7 @@ class TradingAlgorithm(object):
                      for perf in daily_perfs]
         daily_stats = pd.DataFrame(daily_perfs, index=daily_dts)
 
-        return daily_stats
+        return daily_stats, cum_perfs[-1]
 
     def add_transform(self, transform_class, tag, *args, **kwargs):
         """Add a single-sid, sequential transform to the model.

@@ -240,6 +240,9 @@ class AlgorithmSimulator(object):
         """
         Update the universe with new event information.
         """
+        #!! Personal update
+        self.algo.frame_count += 1
+
         # Update our portfolio.
         self.algo.set_portfolio(event.portfolio)
 

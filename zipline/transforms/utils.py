@@ -562,5 +562,6 @@ def batch_transform(func):
         # passes the user defined function to BatchTransform which it
         # will call instead of self.get_value()
         return BatchTransform(*args, func=func, **kwargs)
+        #return BatchTransform(*args, **kwargs)
 
     return create_window

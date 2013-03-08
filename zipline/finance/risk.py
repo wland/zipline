@@ -441,8 +441,12 @@ class RiskMetricsIterative(RiskMetricsBase):
     def update(self, market_close, returns_in_period):
         if self.trading_environment.is_trading_day(self.end_date):
             self.algorithm_returns.append(returns_in_period)
-            self.benchmark_returns.append(
-                self.all_benchmark_returns.pop(0).returns)
+            import ipdb as pdb
+            try:
+                self.benchmark_returns.append(
+                    self.all_benchmark_returns.pop(0).returns)
+            except:
+                pdb.set_trace()
             self.trading_days += 1
             self.update_compounded_log_returns()
 
