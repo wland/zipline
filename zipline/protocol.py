@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
+import datetime
 
 from utils.protocol_utils import Enum
 
@@ -63,6 +65,9 @@ class Portfolio(object):
         if initial_values:
             self.__dict__ = initial_values
 
+    def __getitem__(self, key):
+        return self.__dict__[key]
+
     def __repr__(self):
         return "Portfolio({0})".format(self.__dict__)
 
@@ -75,6 +80,9 @@ class Position(object):
         self.cost_basis = 0.0  # per share
         self.last_sale_price = 0.0
 
+    def __getitem__(self, key):
+        return self.__dict__[key]
+
     def __repr__(self):
         return "Position({0})".format(self.__dict__)
 
@@ -85,3 +93,43 @@ class Positions(dict):
         pos = Position(key)
         self[key] = pos
         return pos
+
+
+class SIDData(object):
+
+    def __init__(self, initial_values=None):
+        if initial_values:
+            self.__dict__ = initial_values
+
+    def __getitem__(self, name):
+        return self.__dict__[name]
+
+    def __setitem__(self, name, value):
+        self.__dict__[name] = value
+
+    def __len__(self):
+        return len(self.__dict__)
+
+    def __contains__(self, name):
+        return name in self.__dict__
+
+    def __repr__(self):
+        return "SIDData({0})".format(self.__dict__)
+
+
+class DailyReturn(object):
+
+    def __init__(self, date, returns):
+
+        assert isinstance(date, datetime.datetime)
+        self.date = date.replace(hour=0, minute=0, second=0)
+        self.returns = returns
+
+    def to_dict(self):
+        return {
+            'dt': self.date,
+            'returns': self.returns
+        }
+
+    def __repr__(self):
+        return str(self.date) + " - " + str(self.returns)

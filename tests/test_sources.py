@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import pandas as pd
+import pytz
+from itertools import cycle
 
 from unittest import TestCase
 
 import zipline.utils.factory as factory
-from zipline.sources import DataFrameSource
+from zipline.sources import DataFrameSource, DataPanelSource
 
 
 class TestDataFrameSource(TestCase):
@@ -52,3 +54,22 @@ class TestDataFrameSource(TestCase):
             self.assertEquals(event['sid'], 0)
             self.assertTrue(isinstance(event['volume'], int))
             self.assertTrue(isinstance(event['arbitrary'], float))
+
+    def test_yahoo_bars_to_panel_source(self):
+        stocks = ['AAPL', 'GE']
+        start = pd.datetime(1993, 1, 1, 0, 0, 0, 0, pytz.utc)
+        end = pd.datetime(2002, 1, 1, 0, 0, 0, 0, pytz.utc)
+        data = factory.load_bars_from_yahoo(stocks=stocks,
+                                            indexes={},
+                                            start=start,
+                                            end=end)
+
+        check_fields = ['sid', 'open', 'high', 'low', 'close',
+                        'volume', 'price']
+        source = DataPanelSource(data)
+        stocks_iter = cycle(stocks)
+        for event in source:
+            for check_field in check_fields:
+                self.assertIn(check_field, event)
+            self.assertTrue(isinstance(event['volume'], (int, long)))
+            self.assertEqual(stocks_iter.next(), event['sid'])

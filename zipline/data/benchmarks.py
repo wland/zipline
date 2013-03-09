@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,15 +25,13 @@ import requests
 
 from loader_utils import (
     date_conversion,
-    source_to_records
+    source_to_records,
+    Mapping
 )
-
-from loader_utils import Mapping
-
-from zipline.finance.risk import DailyReturn
+from zipline.protocol import DailyReturn
 
 _BENCHMARK_MAPPING = {
-    # Need to add 'symbol' and GSPC as a constant
+    # Need to add 'symbol'
     'volume': (int, 'Volume'),
     'open': (float, 'Open'),
     'close': (float, 'Close'),
@@ -50,13 +48,12 @@ def benchmark_mappings():
             in _BENCHMARK_MAPPING.iteritems()}
 
 
-def get_raw_benchmark_data(start_date, end_date):
+def get_raw_benchmark_data(start_date, end_date, symbol):
 
     # create benchmark files
     # ^GSPC 19500103
     params = {
-        # the s&p 500
-        's': '^GSPC',
+        's': symbol,
         # end_date month, zero indexed
         'd': end_date.month - 1,
         # end_date day str(int(todate[6:8])) #day
@@ -79,14 +76,16 @@ def get_raw_benchmark_data(start_date, end_date):
     return csv.DictReader(StringIO(res.content))
 
 
-def get_benchmark_data():
+def get_benchmark_data(symbol, start_date=None, end_date=None):
     """
-    Benchmarks from Yahoo's GSPC source.
+    Benchmarks from Yahoo.
     """
-    start_date = datetime(year=1950, month=1, day=3)
-    end_date = datetime.utcnow()
+    if start_date is None:
+        start_date = datetime(year=1950, month=1, day=3)
+    if end_date is None:
+        end_date = datetime.utcnow()
 
-    raw_benchmark_data = get_raw_benchmark_data(start_date, end_date)
+    raw_benchmark_data = get_raw_benchmark_data(start_date, end_date, symbol)
     # Reverse data so we can load it in reverse chron order.
     benchmarks_source = reversed(list(raw_benchmark_data))
 
@@ -95,11 +94,15 @@ def get_benchmark_data():
     return source_to_records(mappings, benchmarks_source)
 
 
-def get_benchmark_returns():
+def get_benchmark_returns(symbol, start_date=None, end_date=None):
+    if start_date is None:
+        start_date = datetime(year=1950, month=1, day=3)
+    if end_date is None:
+        end_date = datetime.utcnow()
 
     benchmark_returns = []
 
-    for data_point in get_benchmark_data():
+    for data_point in get_benchmark_data(symbol, start_date, end_date):
         returns = (data_point['close'] - data_point['open']) / \
             data_point['open']
         daily_return = DailyReturn(date=data_point['date'], returns=returns)

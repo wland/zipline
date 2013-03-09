@@ -29,7 +29,7 @@ sys.path.append(os.environ['QTRADE'])
 from neuronquant.data.ziplinesource import DataLiveSource
 from zipline.sources import DataFrameSource, DataPanelSource
 
-from zipline.utils.factory import create_trading_environment
+from zipline.utils.factory import create_simulation_parameters
 from zipline.transforms.utils import StatefulTransform
 from zipline.finance.slippage import (
     VolumeShareSlippage,
@@ -41,7 +41,8 @@ from zipline.finance.constants import ANNUALIZER
 
 from zipline.gens.composites import (
     date_sorted_sources,
-    sequential_transforms
+    sequential_transforms,
+    alias_dt
 )
 from zipline.gens.tradesimulation import TradeSimulationClient as tsc
 from zipline import MESSAGES
@@ -91,6 +92,8 @@ class TradingAlgorithm(object):
         self.transforms = []
         self.sources = []
 
+        self._recorded_vars = {}
+
         self.logger = None
 
         # default components for transact
@@ -109,6 +112,8 @@ class TradingAlgorithm(object):
         # set the capital base
         self.capital_base = kwargs.get('capital_base', DEFAULT_CAPITAL_BASE)
 
+        self.sim_params = kwargs.pop('sim_params', None)
+
         # an algorithm subclass needs to set initialized to True when
         # it is fully initialized.
         self.initialized = False
@@ -116,7 +121,7 @@ class TradingAlgorithm(object):
         # call to user-defined constructor method
         self.initialize(*args, **kwargs)
 
-    def _create_generator(self, environment):
+    def _create_generator(self, sim_params):
         """
         Create a basic generator setup using the sources and
         transforms attached to this algorithm.
@@ -125,23 +130,24 @@ class TradingAlgorithm(object):
         self.date_sorted = date_sorted_sources(*self.sources)
         self.with_tnfms = sequential_transforms(self.date_sorted,
                                                 *self.transforms)
+        self.with_alias_dt = alias_dt(self.with_tnfms)
         # Group together events with the same dt field. This depends on the
         # events already being sorted.
-        self.grouped_by_date = groupby(self.with_tnfms, attrgetter('dt'))
-        self.trading_client = tsc(self, environment)
+        self.grouped_by_date = groupby(self.with_alias_dt, attrgetter('dt'))
+        self.trading_client = tsc(self, sim_params)
 
         transact_method = transact_partial(self.slippage, self.commission)
         self.set_transact(transact_method)
 
         return self.trading_client.simulate(self.grouped_by_date)
 
-    def get_generator(self, environment):
+    def get_generator(self):
         """
         Override this method to add new logic to the construction
         of the generator. Overrides can use the _create_generator
         method to get a standard construction generator.
         """
-        return self._create_generator(environment)
+        return self._create_generator(self.sim_params)
 
     def initialize(self, *args, **kwargs):
         pass
@@ -149,7 +155,7 @@ class TradingAlgorithm(object):
     # TODO: make a new subclass, e.g. BatchAlgorithm, and move
     # the run method to the subclass, and refactor to put the
     # generator creation logic into get_generator.
-    def run(self, source, start=None, end=None):
+    def run(self, source, sim_params=None):
         """Run the algorithm.
 
         :Arguments:
@@ -171,9 +177,10 @@ class TradingAlgorithm(object):
 
         """
         if isinstance(source, (list, tuple)):
-            assert start is not None and end is not None, \
+            assert self.sim_params is not None or sim_params is not None, \
                 """When providing a list of sources, \
-                start and end date have to be specified."""
+                sim_params have to be specified as a parameter
+                or in the constructor."""
         elif isinstance(source, pd.DataFrame):
             # if DataFrame provided, wrap in DataFrameSource
             source = DataFrameSource(source)
@@ -184,15 +191,24 @@ class TradingAlgorithm(object):
             source = DataPanelSource(source)
 
         # If values not set, try to extract from source.
-        if start is None:
+        if self.sim_params is None and sim_params is None:
             start = source.start
-        if end is None:
             end = source.end
 
         if not isinstance(source, (list, tuple)):
             self.sources = [source]
         else:
             self.sources = source
+
+        if sim_params:
+            self.sim_params = sim_params
+
+        if not self.sim_params:
+            self.sim_params = create_simulation_parameters(
+                start=start,
+                end=end,
+                capital_base=self.capital_base
+            )
 
         # Create transforms by wrapping them into StatefulTransforms
         self.transforms = []
@@ -206,14 +222,8 @@ class TradingAlgorithm(object):
 
             self.transforms.append(sf)
 
-        environment = create_trading_environment(
-            start=start,
-            end=end,
-            capital_base=self.capital_base
-        )
-
         # create transforms and zipline
-        self.gen = self._create_generator(environment)
+        self.gen = self._create_generator(self.sim_params)
 
         # loop through simulated_trading, each iteration returns a
         # perf ndict
@@ -226,8 +236,15 @@ class TradingAlgorithm(object):
         # create daily and cumulative stats dataframe
         daily_perfs = []
         cum_perfs = []
+        # TODO: the loop here could overwrite expected properties
+        # of daily_perf. Could potentially raise or log a
+        # warning.
         for perf in perfs:
             if 'daily_perf' in perf:
+
+                perf['daily_perf'].update(
+                    perf['daily_perf'].pop('recorded_vars')
+                )
                 daily_perfs.append(perf['daily_perf'])
             else:
                 cum_perfs.append(perf)
@@ -255,6 +272,17 @@ class TradingAlgorithm(object):
         self.registered_transforms[tag] = {'class': transform_class,
                                            'args': args,
                                            'kwargs': kwargs}
+
+    def record(self, **kwargs):
+        """
+        Track and record local variable (i.e. attributes) each day.
+        """
+        for name, value in kwargs.items():
+            self._recorded_vars[name] = value
+
+    @property
+    def recorded_vars(self):
+        return copy(self._recorded_vars)
 
     @property
     def portfolio(self):

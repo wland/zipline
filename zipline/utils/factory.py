@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,129 +18,146 @@
 Factory functions to prepare useful data for tests.
 """
 import pytz
-import msgpack
 import random
-from operator import attrgetter
 from collections import OrderedDict
+from delorean import Delorean
 
 import pandas as pd
 from pandas.io.data import DataReader
 import numpy as np
 from datetime import datetime, timedelta
 
-import zipline.finance.risk as risk
-from zipline.utils.date_utils import tuple_to_date
-from zipline.protocol import Event
+from zipline.protocol import DailyReturn, Event, DATASOURCE_TYPE
 from zipline.sources import (SpecificEquityTrades,
                              DataFrameSource,
                              DataPanelSource)
 from zipline.gens.utils import create_trade
-from zipline.finance.trading import TradingEnvironment
-from zipline.data.loader import (
-    get_datafile,
-    dump_benchmarks,
-    dump_treasury_curves
-)
+from zipline.finance.trading import SimulationParameters
+import zipline.finance.trading as trading
+from zipline.sources.test_source import date_gen
 
 
-def load_market_data():
-    try:
-        fp_bm = get_datafile('benchmark.msgpack', "rb")
-    except IOError:
-        print """
-data msgpacks aren't distribute with source.
-Fetching data from Yahoo Finance.
-""".strip()
-        dump_benchmarks()
-        fp_bm = get_datafile('benchmark.msgpack', "rb")
-
-    bm_list = msgpack.loads(fp_bm.read())
-    bm_returns = []
-    for packed_date, returns in bm_list:
-        event_dt = tuple_to_date(packed_date)
-        #event_dt = event_dt.replace(
-        #    hour=0,
-        #    minute=0,
-        #    second=0,
-        #    tzinfo=pytz.utc
-        #)
-
-        daily_return = risk.DailyReturn(date=event_dt, returns=returns)
-        bm_returns.append(daily_return)
-
-    fp_bm.close()
-
-    bm_returns = sorted(bm_returns, key=attrgetter('date'))
-
-    try:
-        fp_tr = get_datafile('treasury_curves.msgpack', "rb")
-    except IOError:
-        print """
-data msgpacks aren't distribute with source.
-Fetching data from data.treasury.gov
-""".strip()
-        dump_treasury_curves()
-        fp_tr = get_datafile('treasury_curves.msgpack', "rb")
-
-    tr_list = msgpack.loads(fp_tr.read())
-    tr_curves = {}
-    for packed_date, curve in tr_list:
-        tr_dt = tuple_to_date(packed_date)
-        #tr_dt = tr_dt.replace(hour=0, minute=0, second=0, tzinfo=pytz.utc)
-        tr_curves[tr_dt] = curve
-
-    fp_tr.close()
-
-    tr_curves = OrderedDict(sorted(
-                            ((dt, c) for dt, c in tr_curves.iteritems()),
-                            key=lambda t: t[0]))
-
-    return bm_returns, tr_curves
-
-
-def create_trading_environment(year=2006, start=None, end=None,
-                               capital_base=float("1.0e5")):
+def create_simulation_parameters(year=2006, start=None, end=None,
+                                 capital_base=float("1.0e5")
+                                 ):
     """Construct a complete environment with reasonable defaults"""
-    benchmark_returns, treasury_curves = load_market_data()
-
     if start is None:
         start = datetime(year, 1, 1, tzinfo=pytz.utc)
     if end is None:
         end = datetime(year, 12, 31, tzinfo=pytz.utc)
 
-    trading_environment = TradingEnvironment(
-        benchmark_returns,
-        treasury_curves,
+    sim_params = SimulationParameters(
         period_start=start,
         period_end=end,
-        capital_base=capital_base
+        capital_base=capital_base,
     )
 
-    return trading_environment
+    return sim_params
 
 
-def get_next_trading_dt(current, interval, trading_calendar):
-    next = current
-    while True:
-        next = next + interval
-        if trading_calendar.is_market_hours(next):
+def create_noop_environment():
+    oneday = timedelta(days=1)
+    start = datetime(2006, 1, 1, tzinfo=pytz.utc)
+
+    bm_returns = []
+    tr_curves = OrderedDict()
+    for day in date_gen(start=start, delta=oneday, count=252):
+        dr = DailyReturn(day, 0.01)
+        bm_returns.append(dr)
+        curve = {
+            '10year': 0.0799,
+            '1month': 0.0799,
+            '1year': 0.0785,
+            '20year': 0.0765,
+            '2year': 0.0794,
+            '30year': 0.0804,
+            '3month': 0.0789,
+            '3year': 0.0796,
+            '5year': 0.0792,
+            '6month': 0.0794,
+            '7year': 0.0804,
+            'tid': 1752
+        }
+        tr_curves[day] = curve
+
+    load_nodata = lambda x: (bm_returns, tr_curves)
+
+    return trading.TradingEnvironment(load=load_nodata)
+
+
+def create_random_simulation_parameters():
+    trading.environment = trading.TradingEnvironment()
+    treasury_curves = trading.environment.treasury_curves
+
+    for n in range(100):
+
+        random_index = random.randint(
+            0,
+            len(treasury_curves)
+        )
+
+        start_dt = treasury_curves.keys()[random_index]
+        end_dt = start_dt + timedelta(days=365)
+
+        now = datetime.utcnow().replace(tzinfo=pytz.utc)
+
+        if end_dt <= now:
             break
 
-    return next
+    assert end_dt <= now, """
+failed to find a suitable daterange after 100 attempts. please double
+check treasury and benchmark data in findb, and re-run the test."""
+
+    sim_params = SimulationParameters(
+        period_start=start_dt,
+        period_end=end_dt
+    )
+
+    return sim_params, start_dt, end_dt
 
 
-def create_trade_history(sid, prices, amounts, interval, trading_calendar,
+def get_next_trading_dt(current, interval):
+    naive = current.replace(tzinfo=None)
+    delo = Delorean(naive, "UTC")
+    ex_tz = trading.environment.exchange_tz
+    next_dt = delo.shift(ex_tz).datetime
+
+    while True:
+        next_dt = next_dt + interval
+        next_delo = Delorean(next_dt.replace(tzinfo=None), ex_tz)
+        next_utc = next_delo.shift("UTC").datetime
+        if trading.environment.is_market_hours(next_utc):
+            break
+
+    return next_utc
+
+
+def create_trade_history(sid, prices, amounts, interval, sim_params,
                          source_id="test_factory"):
     trades = []
-    current = trading_calendar.first_open
+    current = sim_params.first_open
 
     for price, amount in zip(prices, amounts):
         trade = create_trade(sid, price, amount, current, source_id)
         trades.append(trade)
-        current = get_next_trading_dt(current, interval, trading_calendar)
+        current = get_next_trading_dt(current, interval)
 
     assert len(trades) == len(prices)
     return trades
+
+
+def create_dividend(sid, payment, declared_date, ex_date, pay_date):
+    div = Event({
+        'sid': sid,
+        'gross_amount': payment,
+        'net_amount': payment,
+        'dt': declared_date.replace(hour=0, minute=0, second=0),
+        'ex_date': ex_date.replace(hour=0, minute=0, second=0),
+        'pay_date': pay_date.replace(hour=0, minute=0, second=0),
+        'type': DATASOURCE_TYPE.DIVIDEND
+    })
+
+    return div
 
 
 def create_txn(sid, price, amount, datetime):
@@ -153,115 +170,115 @@ def create_txn(sid, price, amount, datetime):
     return txn
 
 
-def create_txn_history(sid, priceList, amtList, interval, trading_calendar):
+def create_txn_history(sid, priceList, amtList, interval, sim_params):
     txns = []
-    current = trading_calendar.first_open
+    current = sim_params.first_open
 
     for price, amount in zip(priceList, amtList):
-        current = get_next_trading_dt(current, interval, trading_calendar)
+        current = get_next_trading_dt(current, interval)
 
         txns.append(create_txn(sid, price, amount, current))
         current = current + interval
     return txns
 
 
-def create_returns(daycount, trading_calendar):
+def create_returns(daycount, sim_params):
     """
     For the given number of calendar (not trading) days return all the trading
     days between start and start + daycount.
     """
     test_range = []
-    current = trading_calendar.first_open
+    current = sim_params.first_open
     one_day = timedelta(days=1)
 
     for day in range(daycount):
         current = current + one_day
-        if trading_calendar.is_trading_day(current):
-            r = risk.DailyReturn(current, random.random())
+        if trading.environment.is_trading_day(current):
+            r = DailyReturn(current, random.random())
             test_range.append(r)
 
     return test_range
 
 
-def create_returns_from_range(trading_calendar):
-    current = trading_calendar.first_open
-    end = trading_calendar.last_close
+def create_returns_from_range(sim_params):
+    current = sim_params.first_open
+    end = sim_params.last_close
     one_day = timedelta(days=1)
     test_range = []
     while current <= end:
-        r = risk.DailyReturn(current, random.random())
+        r = DailyReturn(current, random.random())
         test_range.append(r)
-        current = get_next_trading_dt(current, one_day, trading_calendar)
+        current = get_next_trading_dt(current, one_day)
 
     return test_range
 
 
-def create_returns_from_list(returns, trading_calendar):
-    current = trading_calendar.first_open
+def create_returns_from_list(returns, sim_params):
+    current = sim_params.first_open
     one_day = timedelta(days=1)
     test_range = []
 
     #sometimes the range starts with a non-trading day.
-    if not trading_calendar.is_trading_day(current):
-        current = get_next_trading_dt(current, one_day, trading_calendar)
+    if not trading.environment.is_trading_day(current):
+        current = get_next_trading_dt(current, one_day)
 
     for return_val in returns:
-        r = risk.DailyReturn(current, return_val)
+        r = DailyReturn(current, return_val)
         test_range.append(r)
-        current = get_next_trading_dt(current, one_day, trading_calendar)
+        current = get_next_trading_dt(current, one_day)
 
     return test_range
 
 
-def create_daily_trade_source(sids, trade_count, trading_environment,
+def create_daily_trade_source(sids, trade_count, sim_params,
                               concurrent=False):
     """
     creates trade_count trades for each sid in sids list.
-    first trade will be on trading_environment.period_start, and daily
+    first trade will be on sim_params.period_start, and daily
     thereafter for each sid. Thus, two sids should result in two trades per
     day.
 
-    Important side-effect: trading_environment.period_end will be modified
+    Important side-effect: sim_params.period_end will be modified
     to match the day of the final trade.
     """
     return create_trade_source(
         sids,
         trade_count,
         timedelta(days=1),
-        trading_environment,
+        sim_params,
         concurrent=concurrent
     )
 
 
-def create_minutely_trade_source(sids, trade_count, trading_environment,
+def create_minutely_trade_source(sids, trade_count, sim_params,
                                  concurrent=False):
     """
     creates trade_count trades for each sid in sids list.
-    first trade will be on trading_environment.period_start, and every minute
+    first trade will be on sim_params.period_start, and every minute
     thereafter for each sid. Thus, two sids should result in two trades per
     minute.
 
-    Important side-effect: trading_environment.period_end will be modified
+    Important side-effect: sim_params.period_end will be modified
     to match the day of the final trade.
     """
     return create_trade_source(
         sids,
         trade_count,
         timedelta(minutes=1),
-        trading_environment,
+        sim_params,
         concurrent=concurrent
     )
 
 
 def create_trade_source(sids, trade_count,
-                        trade_time_increment, trading_environment,
+                        trade_time_increment, sim_params,
                         concurrent=False):
 
     args = tuple()
     kwargs = {
         'count': trade_count,
         'sids': sids,
-        'start': trading_environment.first_open,
+        'start': sim_params.first_open,
         'delta': trade_time_increment,
         'filter': sids,
         'concurrent': concurrent
@@ -270,19 +287,24 @@ def create_trade_source(sids, trade_count,
 
     # TODO: do we need to set the trading environment's end to same dt as
     # the last trade in the history?
-    #trading_environment.period_end = trade_history[-1].dt
+    #sim_params.period_end = trade_history[-1].dt
 
     return source
 
 
-def create_test_df_source(trading_calendar=None):
-    start = trading_calendar.first_open \
-        if trading_calendar else pd.datetime(1990, 1, 3, 0, 0, 0, 0, pytz.utc)
+def create_test_df_source(sim_params=None):
 
-    end = trading_calendar.last_close \
-        if trading_calendar else pd.datetime(1990, 1, 8, 0, 0, 0, 0, pytz.utc)
+    if sim_params:
+        index = sim_params.trading_days
+    else:
+        start = pd.datetime(1990, 1, 3, 0, 0, 0, 0, pytz.utc)
+        end = pd.datetime(1990, 1, 8, 0, 0, 0, 0, pytz.utc)
+        index = pd.DatetimeIndex(
+            start=start,
+            end=end,
+            freq=pd.datetools.BDay()
+        )
 
-    index = pd.DatetimeIndex(start=start, end=end, freq=pd.datetools.day)
     x = np.arange(0, len(index))
 
     df = pd.DataFrame(x, index=index, columns=[0])
@@ -290,12 +312,12 @@ def create_test_df_source(trading_calendar=None):
     return DataFrameSource(df), df
 
 
-def create_test_panel_source(trading_calendar=None):
-    start = trading_calendar.first_open \
-        if trading_calendar else pd.datetime(1990, 1, 3, 0, 0, 0, 0, pytz.utc)
+def create_test_panel_source(sim_params=None):
+    start = sim_params.first_open \
+        if sim_params else pd.datetime(1990, 1, 3, 0, 0, 0, 0, pytz.utc)
 
-    end = trading_calendar.last_close \
-        if trading_calendar else pd.datetime(1990, 1, 8, 0, 0, 0, 0, pytz.utc)
+    end = sim_params.last_close \
+        if sim_params else pd.datetime(1990, 1, 8, 0, 0, 0, 0, pytz.utc)
 
     index = pd.DatetimeIndex(start=start, end=end, freq=pd.datetools.day)
     price = np.arange(0, len(index))
@@ -311,7 +333,7 @@ def create_test_panel_source(trading_calendar=None):
     return DataPanelSource(panel), panel
 
 
-def load_from_yahoo(indexes=None, stocks=None, start=None, end=None):
+def _load_raw_yahoo_data(indexes=None, stocks=None, start=None, end=None):
     """Load closing prices from yahoo finance.
 
     :Optional:
@@ -352,8 +374,89 @@ def load_from_yahoo(indexes=None, stocks=None, start=None, end=None):
         print name
         stkd = DataReader(ticker, 'yahoo', start, end).sort_index()
         data[name] = stkd
+    return data
 
-    df = pd.DataFrame({key: d['Close'] for key, d in data.iteritems()})
+
+def load_from_yahoo(indexes=None,
+                    stocks=None,
+                    start=None,
+                    end=None,
+                    adjusted=True):
+    """
+    Loads price data from Yahoo into a dataframe for each of the indicated
+    securities.  By default, 'price' is taken from Yahoo's 'Adjusted Close',
+    which removes the impact of splits and dividends. If the argument
+    'adjusted' is False, then the non-adjusted 'close' field is used instead.
+
+    :Arguments:
+        indexes : dict (Default: {'SPX': '^GSPC'})
+            Financial indexes to load.
+        stocks : list (Default: ['AAPL', 'GE', 'IBM', 'MSFT',
+                                 'XOM', 'AA', 'JNJ', 'PEP', 'KO'])
+            Stock closing prices to load.
+        start : datetime (Default: datetime(1993, 1, 1, 0, 0, 0, 0, pytz.utc))
+            Retrieve prices from start date on.
+        end : datetime (Default: datetime(2002, 1, 1, 0, 0, 0, 0, pytz.utc))
+            Retrieve prices until end date.
+        adjusted : bool (Default: True)
+            Adjust the price for splits and dividends.
+
+    """
+    data = _load_raw_yahoo_data(indexes, stocks, start, end)
+    if adjusted:
+        close_key = 'Adj Close'
+    else:
+        close_key = 'Close'
+    df = pd.DataFrame({key: d[close_key] for key, d in data.iteritems()})
     df.index = df.index.tz_localize(pytz.utc)
-
     return df
+
+
+def load_bars_from_yahoo(indexes=None,
+                         stocks=None,
+                         start=None,
+                         end=None,
+                         adjusted=True):
+    """
+    Loads data from Yahoo into a panel with the following
+    column names for each indicated security:
+        - open
+        - high
+        - low
+        - close
+        - volume
+        - price
+
+    Note that 'price' is Yahoo's 'Adjusted Close', which removes the
+    impact of splits and dividends. If the argument 'adjusted' is True, then
+    the open, high, low, and close values are adjusted as well.
+
+    :Arguments:
+        indexes : dict (Default: {'SPX': '^GSPC'})
+            Financial indexes to load.
+        stocks : list (Default: ['AAPL', 'GE', 'IBM', 'MSFT',
+                                 'XOM', 'AA', 'JNJ', 'PEP', 'KO'])
+            Stock closing prices to load.
+        start : datetime (Default: datetime(1993, 1, 1, 0, 0, 0, 0, pytz.utc))
+            Retrieve prices from start date on.
+        end : datetime (Default: datetime(2002, 1, 1, 0, 0, 0, 0, pytz.utc))
+            Retrieve prices until end date.
+        adjusted : bool (Default: True)
+            Adjust open/high/low/close for splits and dividends.  The 'price'
+            field is always adjusted.
+
+    """
+    data = _load_raw_yahoo_data(indexes, stocks, start, end)
+    panel = pd.Panel(data)
+    # Rename columns
+    panel.minor_axis = ['open', 'high', 'low', 'close', 'volume', 'price']
+    panel.major_axis = panel.major_axis.tz_localize(pytz.utc)
+    # Adjust data
+    if adjusted:
+        adj_cols = ['open', 'high', 'low', 'close']
+        for ticker in panel.items:
+            ratio = (panel[ticker]['price'] / panel[ticker]['close'])
+            ratio_filtered = ratio.fillna(0).values
+            for col in adj_cols:
+                panel[ticker][col] *= ratio_filtered
+    return panel

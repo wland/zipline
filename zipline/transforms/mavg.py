@@ -16,7 +16,6 @@
 from numbers import Number
 from collections import defaultdict
 
-from zipline import ndict
 from zipline.transforms.utils import EventWindow, TransformMeta
 
 
@@ -31,6 +30,7 @@ class MovingAverage(object):
 
     def __init__(self, fields='price',
                  market_aware=True, window_length=None, delta=None):
+
         if isinstance(fields, basestring):
             fields = [fields]
         self.fields = fields
@@ -75,6 +75,18 @@ class MovingAverage(object):
         window = self.sid_windows[event.sid]
         window.update(event)
         return window.get_averages()
+
+
+class Averages(object):
+    """
+    Container for averages.
+    """
+
+    def __getitem__(self, name):
+        """
+        Allow dictionary lookup.
+        """
+        return self.__dict__[name]
 
 
 class MovingAverageEventWindow(EventWindow):
@@ -131,9 +143,9 @@ class MovingAverageEventWindow(EventWindow):
         """
         Return an ndict of all our tracked averages.
         """
-        out = ndict()
+        out = Averages()
         for field in self.fields:
-            out[field] = self.average(field)
+            out.__dict__[field] = self.average(field)
         return out
 
     def assert_required_fields(self, event):

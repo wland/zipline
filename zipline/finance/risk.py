@@ -37,6 +37,9 @@ Risk Report
     | sharpe          | The sharpe ratio based on the _algorithm_ (rather  |
     |                 | than the static portfolio) returns.                |
     +-----------------+----------------------------------------------------+
+    | information     | The information ratio based on the _algorithm_     |
+    |                 | (rather than the static portfolio) returns.        |
+    +-----------------+----------------------------------------------------+
     | beta            | The _algorithm_ beta to the benchmark.             |
     +-----------------+----------------------------------------------------+
     | alpha           | The _algorithm_ alpha to the benchmark.            |
@@ -55,11 +58,15 @@ Risk Report
 import logbook
 import datetime
 import math
+import itertools
 from collections import OrderedDict
 import bisect
 import numpy as np
 import numpy.linalg as la
+
+import zipline.finance.trading as trading
 from zipline.utils.date_utils import epoch_now
+
 
 log = logbook.Logger('Risk')
 
@@ -87,39 +94,20 @@ def advance_by_months(dt, jump_in_months):
     return dt.replace(year=dt.year + years, month=month)
 
 
-class DailyReturn(object):
-
-    def __init__(self, date, returns):
-
-        assert isinstance(date, datetime.datetime)
-        self.date = date.replace(hour=0, minute=0, second=0)
-        self.returns = returns
-
-    def to_dict(self):
-        return {
-            'dt': self.date,
-            'returns': self.returns
-        }
-
-    def __repr__(self):
-        return str(self.date) + " - " + str(self.returns)
-
-
 class RiskMetricsBase(object):
-    def __init__(self, start_date, end_date, returns, trading_environment):
+    def __init__(self, start_date, end_date, returns):
 
-        self.treasury_curves = trading_environment.treasury_curves
+        self.treasury_curves = trading.environment.treasury_curves
         assert isinstance(self.treasury_curves, OrderedDict), \
             "Treasury curves must be an OrderedDict"
 
         self.start_date = start_date
         self.end_date = end_date
-        self.trading_environment = trading_environment
         self.algorithm_period_returns, self.algorithm_returns = \
             self.calculate_period_returns(returns)
 
         benchmark_returns = [
-            x for x in self.trading_environment.benchmark_returns
+            x for x in trading.environment.benchmark_returns
             if x.date >= returns[0].date and x.date <= returns[-1].date
         ]
 
@@ -144,6 +132,8 @@ class RiskMetricsBase(object):
             self.algorithm_returns)
         self.treasury_period_return = self.choose_treasury()
         self.sharpe = self.calculate_sharpe()
+        self.sortino = self.calculate_sortino()
+        self.information = self.calculate_information()
         self.beta, self.algorithm_covariance, self.benchmark_variance, \
             self.condition_number, self.eigen_values = self.calculate_beta()
         self.alpha = self.calculate_alpha()
@@ -165,6 +155,8 @@ class RiskMetricsBase(object):
             'algorithm_period_return': self.algorithm_period_returns,
             'benchmark_period_return': self.benchmark_period_returns,
             'sharpe': self.sharpe,
+            'sortino': self.sortino,
+            'information': self.information,
             'beta': self.beta,
             'alpha': self.alpha,
             'excess_return': self.excess_return,
@@ -193,6 +185,8 @@ class RiskMetricsBase(object):
             "benchmark_volatility",
             "algorithm_volatility",
             "sharpe",
+            "sortino",
+            "information",
             "algorithm_covariance",
             "benchmark_variance",
             "beta",
@@ -217,7 +211,7 @@ class RiskMetricsBase(object):
             x.returns for x in daily_returns
             if x.date >= self.start_date and
             x.date <= self.end_date and
-            self.trading_environment.is_trading_day(x.date)
+            trading.environment.is_trading_day(x.date)
         ]
 
         period_returns = 1.0
@@ -240,6 +234,44 @@ class RiskMetricsBase(object):
 
         return ((self.algorithm_period_returns - self.treasury_period_return) /
                 self.algorithm_volatility)
+
+    def calculate_sortino(self, mar=None):
+        """
+        http://en.wikipedia.org/wiki/Sortino_ratio
+        """
+        if len(self.algorithm_returns) == 0:
+            return 0.0
+
+        if mar is None:
+            mar = self.treasury_period_return
+
+        downside = [
+            (x - mar)**2
+            for x in self.algorithm_returns
+            if x < mar]
+        dr = float(math.sqrt(sum(downside) / len(self.algorithm_returns)))
+
+        if dr < 0.000001:
+            return 0.0
+
+        return ((self.algorithm_period_returns - mar) / dr)
+
+    def calculate_information(self):
+        """
+        http://en.wikipedia.org/wiki/Information_ratio
+        """
+
+        relative_returns = [
+            r - b
+            for r, b
+            in itertools.izip(self.algorithm_returns, self.benchmark_returns)]
+
+        relative_deviation = np.std(relative_returns, ddof=1)
+
+        if relative_deviation < 0.000001 or np.isnan(relative_deviation):
+            return 0.0
+
+        return np.mean(relative_returns) / relative_deviation
 
     def calculate_beta(self):
         """
@@ -379,7 +411,7 @@ that date doesn't exceed treasury history range."
         raise Exception(message)
 
     def search_day_distance(self, dt):
-        tdd = self.trading_environment.trading_day_distance(dt, self.end_date)
+        tdd = trading.environment.trading_day_distance(dt, self.end_date)
         if tdd is None:
             return None
         assert tdd >= 0
@@ -409,11 +441,10 @@ class RiskMetricsIterative(RiskMetricsBase):
         Call update() method on each dt to update the metrics.
     """
 
-    def __init__(self, start_date, trading_environment):
-        self.treasury_curves = trading_environment.treasury_curves
+    def __init__(self, start_date):
+        self.treasury_curves = trading.environment.treasury_curves
         self.start_date = start_date
         self.end_date = start_date
-        self.trading_environment = trading_environment
 
         self.compounded_log_returns = []
         self.moving_avg = []
@@ -425,6 +456,8 @@ class RiskMetricsIterative(RiskMetricsBase):
         self.algorithm_period_returns = []
         self.benchmark_period_returns = []
         self.sharpe = []
+        self.sortino = []
+        self.information = []
         self.beta = []
         self.alpha = []
         self.max_drawdown = 0
@@ -434,12 +467,12 @@ class RiskMetricsIterative(RiskMetricsBase):
         self.trading_days = 0
 
         self.all_benchmark_returns = [
-            x for x in self.trading_environment.benchmark_returns
+            x for x in trading.environment.benchmark_returns
             if x.date >= self.start_date
         ]
 
     def update(self, market_close, returns_in_period):
-        if self.trading_environment.is_trading_day(self.end_date):
+        if trading.environment.is_trading_day(self.end_date):
             self.algorithm_returns.append(returns_in_period)
             import ipdb as pdb
             try:
@@ -479,6 +512,8 @@ algorithm_returns ({algo_count}) in range {start} : {end}"
         self.beta.append(self.calculate_beta()[0])
         self.alpha.append(self.calculate_alpha())
         self.sharpe.append(self.calculate_sharpe())
+        self.sortino.append(self.calculate_sortino())
+        self.information.append(self.calculate_information())
         self.max_drawdown = self.calculate_max_drawdown()
 
     def to_dict(self):
@@ -495,6 +530,8 @@ algorithm_returns ({algo_count}) in range {start} : {end}"
             'algorithm_period_return': self.algorithm_period_returns[-1],
             'benchmark_period_return': self.benchmark_period_returns[-1],
             'sharpe': self.sharpe[-1],
+            'sortino': self.sortino[-1],
+            'information': self.information[-1],
             'beta': self.beta[-1],
             'alpha': self.alpha[-1],
             'excess_return': self.excess_returns[-1],
@@ -524,6 +561,8 @@ algorithm_returns ({algo_count}) in range {start} : {end}"
             "benchmark_volatility",
             "algorithm_volatility",
             "sharpe",
+            "sortino",
+            "information",
             "algorithm_covariance",
             "benchmark_variance",
             "beta",
@@ -602,6 +641,45 @@ algorithm_returns ({algo_count}) in range {start} : {end}"
         return (self.algorithm_period_returns[-1] -
                 self.treasury_period_return) / self.algorithm_volatility[-1]
 
+    def calculate_sortino(self, mar=None):
+        """
+        http://en.wikipedia.org/wiki/Sortino_ratio
+        """
+        if len(self.algorithm_returns) == 0:
+            return 0.0
+
+        if mar is None:
+            mar = self.treasury_period_return
+
+        downside = [
+            (x - mar)**2
+            for x in self.algorithm_returns
+            if x < mar]
+        dr = float(math.sqrt(sum(downside) / len(self.algorithm_returns)))
+
+        if dr < 0.000001:
+            return 0.0
+
+        return ((self.algorithm_period_returns[-1] - mar) /
+                dr)
+
+    def calculate_information(self):
+        """
+        http://en.wikipedia.org/wiki/Information_ratio
+        """
+
+        relative_returns = [
+            r - b
+            for r, b
+            in itertools.izip(self.algorithm_returns, self.benchmark_returns)]
+
+        relative_deviation = np.std(relative_returns, ddof=1)
+
+        if relative_deviation < 0.000001 or np.isnan(relative_deviation):
+            return 0.0
+
+        return np.mean(relative_returns) / relative_deviation
+
     def calculate_alpha(self):
         """
         http://en.wikipedia.org/wiki/Alpha_(investment)
@@ -620,7 +698,7 @@ class RiskReport(object):
     def __init__(
         self,
         algorithm_returns,
-        trading_environment,
+        sim_params
     ):
         """
         algorithm_returns needs to be a list of daily_return objects
@@ -628,12 +706,12 @@ class RiskReport(object):
         """
 
         self.algorithm_returns = algorithm_returns
-        self.trading_environment = trading_environment
+        self.sim_params = sim_params
         self.created = epoch_now()
 
         if len(self.algorithm_returns) == 0:
-            start_date = self.trading_environment.period_start
-            end_date = self.trading_environment.period_end
+            start_date = self.sim_params.period_start
+            end_date = self.sim_params.period_end
         else:
             start_date = self.algorithm_returns[0].date
             end_date = self.algorithm_returns[-1].date
@@ -687,8 +765,7 @@ class RiskReport(object):
             cur_period_metrics = RiskMetricsBatch(
                 start_date=cur_start,
                 end_date=cur_end,
-                returns=self.algorithm_returns,
-                trading_environment=self.trading_environment
+                returns=self.algorithm_returns
             )
 
             ends.append(cur_period_metrics)

@@ -20,7 +20,7 @@ import pytz
 import zipline.finance.risk as risk
 from zipline.utils import factory
 
-from zipline.finance.trading import TradingEnvironment
+from zipline.finance.trading import SimulationParameters
 
 
 class Risk(unittest.TestCase):
@@ -37,12 +37,7 @@ class Risk(unittest.TestCase):
         end_date = datetime.datetime(
             year=2006, month=12, day=31, tzinfo=pytz.utc)
 
-        self.benchmark_returns, self.treasury_curves = \
-            factory.load_market_data()
-
-        self.trading_env = TradingEnvironment(
-            self.benchmark_returns,
-            self.treasury_curves,
+        self.sim_params = SimulationParameters(
             period_start=start_date,
             period_end=end_date
         )
@@ -54,12 +49,12 @@ class Risk(unittest.TestCase):
 
         self.algo_returns_06 = factory.create_returns_from_list(
             RETURNS,
-            self.trading_env
+            self.sim_params
         )
 
         self.metrics_06 = risk.RiskReport(
             self.algo_returns_06,
-            self.trading_env
+            self.sim_params
         )
 
         start_08 = datetime.datetime(
@@ -76,9 +71,7 @@ class Risk(unittest.TestCase):
             day=31,
             tzinfo=pytz.utc
         )
-        self.trading_env08 = TradingEnvironment(
-            self.benchmark_returns,
-            self.treasury_curves,
+        self.sim_params08 = SimulationParameters(
             period_start=start_08,
             period_end=end_08
         )
@@ -88,24 +81,23 @@ class Risk(unittest.TestCase):
 
     def test_factory(self):
         returns = [0.1] * 100
-        r_objects = factory.create_returns_from_list(returns, self.trading_env)
+        r_objects = factory.create_returns_from_list(returns, self.sim_params)
         self.assertTrue(r_objects[-1].date <=
                         datetime.datetime(
                             year=2006, month=12, day=31, tzinfo=pytz.utc))
 
     def test_drawdown(self):
         returns = factory.create_returns_from_list(
-            [1.0, -0.5, 0.8, .17, 1.0, -0.1, -0.45], self.trading_env)
+            [1.0, -0.5, 0.8, .17, 1.0, -0.1, -0.45], self.sim_params)
         #200, 100, 180, 210.6, 421.2, 379.8, 208.494
         metrics = risk.RiskMetricsBatch(returns[0].date,
                                         returns[-1].date,
-                                        returns,
-                                        self.trading_env)
+                                        returns)
         self.assertEqual(metrics.max_drawdown, 0.505)
 
     def test_benchmark_returns_06(self):
-        returns = factory.create_returns_from_range(self.trading_env)
-        metrics = risk.RiskReport(returns, self.trading_env)
+        returns = factory.create_returns_from_range(self.sim_params)
+        metrics = risk.RiskReport(returns, self.sim_params)
         self.assertEqual([round(x.benchmark_period_returns, 4)
                           for x in metrics.month_periods],
                          [0.0255,
@@ -146,16 +138,16 @@ class Risk(unittest.TestCase):
                          [0.1407])
 
     def test_trading_days_06(self):
-        returns = factory.create_returns_from_range(self.trading_env)
-        metrics = risk.RiskReport(returns, self.trading_env)
+        returns = factory.create_returns_from_range(self.sim_params)
+        metrics = risk.RiskReport(returns, self.sim_params)
         self.assertEqual([x.trading_days for x in metrics.year_periods],
                          [251])
         self.assertEqual([x.trading_days for x in metrics.month_periods],
                          [20, 19, 23, 19, 22, 22, 20, 23, 20, 22, 21, 20])
 
     def test_benchmark_volatility_06(self):
-        returns = factory.create_returns_from_range(self.trading_env)
-        metrics = risk.RiskReport(returns, self.trading_env)
+        returns = factory.create_returns_from_range(self.sim_params)
+        metrics = risk.RiskReport(returns, self.sim_params)
         self.assertEqual([round(x.benchmark_volatility, 3)
                           for x in metrics.month_periods],
                          [0.031,
@@ -326,6 +318,86 @@ class Risk(unittest.TestCase):
         self.assertEqual([round(x.sharpe, 3)
                           for x in self.metrics_06.year_periods],
                          [-0.066])
+
+    def test_algorithm_sortino_06(self):
+        self.assertEqual([round(x.sortino, 3)
+                          for x in self.metrics_06.month_periods],
+                         [4.491,
+                          -2.842,
+                          -2.052,
+                          3.898,
+                          7.023,
+                          -8.532,
+                          3.079,
+                          -0.354,
+                          -1.125,
+                          3.009,
+                          3.277,
+                          -3.122])
+        self.assertEqual([round(x.sortino, 3)
+                          for x in self.metrics_06.three_month_periods],
+                         [-0.769,
+                          -1.043,
+                          6.677,
+                          -2.77,
+                          -3.209,
+                          -6.769,
+                          1.253,
+                          1.085,
+                          3.659,
+                          1.674])
+        self.assertEqual([round(x.sortino, 3)
+                          for x in self.metrics_06.six_month_periods],
+                         [-2.728,
+                          -3.258,
+                          -1.84,
+                          -1.366,
+                          -1.845,
+                          -3.415,
+                          2.238])
+        self.assertEqual([round(x.sortino, 3)
+                          for x in self.metrics_06.year_periods],
+                         [-0.524])
+
+    def test_algorithm_information_06(self):
+        self.assertEqual([round(x.information, 3)
+                          for x in self.metrics_06.month_periods],
+                         [0.131,
+                          -0.11,
+                          -0.067,
+                          0.144,
+                          0.298,
+                          -0.391,
+                          0.106,
+                          -0.034,
+                          -0.058,
+                          0.068,
+                          0.09,
+                          -0.125])
+        self.assertEqual([round(x.information, 3)
+                          for x in self.metrics_06.three_month_periods],
+                         [-0.013,
+                          -0.006,
+                          0.113,
+                          -0.012,
+                          -0.02,
+                          -0.11,
+                          0.01,
+                          -0.005,
+                          0.03,
+                          0.009])
+        self.assertEqual([round(x.information, 3)
+                          for x in self.metrics_06.six_month_periods],
+                         [-0.013,
+                          -0.013,
+                          -0.003,
+                          -0.002,
+                          -0.013,
+                          -0.042,
+                          0.009])
+        self.assertEqual([round(x.information, 3)
+                          for x in self.metrics_06.year_periods],
+                         [-0.002])
 
     def dtest_algorithm_beta_06(self):
         self.assertEqual([round(x.beta, 3)
@@ -508,8 +580,8 @@ class Risk(unittest.TestCase):
                          [0.0000399])
 
     def test_benchmark_returns_08(self):
-        returns = factory.create_returns_from_range(self.trading_env08)
-        metrics = risk.RiskReport(returns, self.trading_env08)
+        returns = factory.create_returns_from_range(self.sim_params08)
+        metrics = risk.RiskReport(returns, self.sim_params08)
 
         monthly = [round(x.benchmark_period_returns, 3)
                    for x in metrics.month_periods]
@@ -556,8 +628,8 @@ class Risk(unittest.TestCase):
                          [-0.353])
 
     def test_trading_days_08(self):
-        returns = factory.create_returns_from_range(self.trading_env08)
-        metrics = risk.RiskReport(returns, self.trading_env08)
+        returns = factory.create_returns_from_range(self.sim_params08)
+        metrics = risk.RiskReport(returns, self.sim_params08)
         self.assertEqual([x.trading_days for x in metrics.year_periods],
                          [253])
 
@@ -565,8 +637,8 @@ class Risk(unittest.TestCase):
                          [21, 20, 20, 22, 21, 21, 22, 21, 21, 23, 19, 22])
 
     def test_benchmark_volatility_08(self):
-        returns = factory.create_returns_from_range(self.trading_env08)
-        metrics = risk.RiskReport(returns, self.trading_env08)
+        returns = factory.create_returns_from_range(self.sim_params08)
+        metrics = risk.RiskReport(returns, self.sim_params08)
         self.assertEqual([round(x.benchmark_volatility, 3)
                           for x in metrics.month_periods],
                          [0.069,
@@ -612,8 +684,8 @@ class Risk(unittest.TestCase):
                          [0.391])
 
     def test_treasury_returns_06(self):
-        returns = factory.create_returns_from_range(self.trading_env)
-        metrics = risk.RiskReport(returns, self.trading_env)
+        returns = factory.create_returns_from_range(self.sim_params)
+        metrics = risk.RiskReport(returns, self.sim_params)
         self.assertEqual([round(x.treasury_period_return, 4)
                           for x in metrics.month_periods],
                          [0.0037,
@@ -672,16 +744,14 @@ class Risk(unittest.TestCase):
         #1992 and 1996 were leap years
         total_days = 365 * 5 + 2
         end = start + datetime.timedelta(days=total_days)
-        trading_env90s = TradingEnvironment(
-            self.benchmark_returns,
-            self.treasury_curves,
+        sim_params90s = SimulationParameters(
             period_start=start,
             period_end=end
         )
 
-        returns = factory.create_returns(total_days, trading_env90s)
+        returns = factory.create_returns(total_days, sim_params90s)
         returns = returns[:-10]  # truncate the returns series to end mid-month
-        metrics = risk.RiskReport(returns, trading_env90s)
+        metrics = risk.RiskReport(returns, sim_params90s)
         total_months = 60
         self.check_metrics(metrics, total_months, start)
 
@@ -693,8 +763,8 @@ class Risk(unittest.TestCase):
             # and i think this func is [start,end)
             ld = calendar.leapdays(start_date.year,
                                    start_date.year + years + 1)
-        returns = factory.create_returns(365 * years + ld, self.trading_env08)
-        metrics = risk.RiskReport(returns, self.trading_env)
+        returns = factory.create_returns(365 * years + ld, self.sim_params08)
+        metrics = risk.RiskReport(returns, self.sim_params)
         total_months = years * 12
         self.check_metrics(metrics, total_months, start_date)
 

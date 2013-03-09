@@ -18,8 +18,9 @@ from unittest import TestCase
 from nose.tools import timed
 
 from datetime import datetime
-import pytz
 
+import pytz
+import zipline.finance.trading as trading
 from zipline.algorithm import TradingAlgorithm
 from zipline.finance import slippage
 from zipline.utils import factory
@@ -78,26 +79,77 @@ class AlgorithmGeneratorTestCase(TestCase):
     def tearDown(self):
         teardown_logger(self)
 
+    def test_lse_algorithm(self):
+
+        lse = trading.TradingEnvironment(
+            bm_symbol='^FTSE',
+            exchange_tz='Europe/London'
+        )
+
+        with lse:
+
+            sim_params = factory.create_simulation_parameters(
+                start=datetime(2012, 5, 1, tzinfo=pytz.utc),
+                end=datetime(2012, 6, 30, tzinfo=pytz.utc)
+            )
+            algo = TestAlgo(self, sim_params=sim_params)
+            trade_source = factory.create_daily_trade_source(
+                [8229],
+                200,
+                sim_params
+            )
+            algo.set_sources([trade_source])
+
+            gen = algo.get_generator()
+            results = list(gen)
+            self.assertEqual(len(results), 42)
+            # May 7, 2012 was an LSE holiday, confirm the 4th trading
+            # day was May 8.
+            self.assertEqual(results[4]['daily_perf']['period_open'],
+                             datetime(2012, 5, 8, 8, 30, tzinfo=pytz.utc))
+
     @timed(DEFAULT_TIMEOUT)
     def test_generator_dates(self):
         """
         Ensure the pipeline of generators are in sync, at least as far as
         their current dates.
         """
-        algo = TestAlgo(self)
-        trading_environment = factory.create_trading_environment(
-            start=datetime(2012, 1, 3, tzinfo=pytz.utc),
+        sim_params = factory.create_simulation_parameters(
+            start=datetime(2011, 7, 30, tzinfo=pytz.utc),
             end=datetime(2012, 7, 30, tzinfo=pytz.utc)
         )
+        algo = TestAlgo(self, sim_params=sim_params)
         trade_source = factory.create_daily_trade_source(
             [8229],
             200,
-            trading_environment
+            sim_params
         )
         algo.set_sources([trade_source])
 
-        gen = algo.get_generator(trading_environment)
+        gen = algo.get_generator()
         self.assertTrue(list(gen))
 
         self.assertTrue(algo.slippage.latest_date)
         self.assertTrue(algo.latest_date)
+
+    @timed(DEFAULT_TIMEOUT)
+    def test_progress(self):
+        """
+        Ensure the pipeline of generators are in sync, at least as far as
+        their current dates.
+        """
+        sim_params = factory.create_simulation_parameters(
+            start=datetime(2008, 1, 1, tzinfo=pytz.utc),
+            end=datetime(2008, 1, 5, tzinfo=pytz.utc)
+        )
+        algo = TestAlgo(self, sim_params=sim_params)
+        trade_source = factory.create_daily_trade_source(
+            [8229],
+            3,
+            sim_params
+        )
+        algo.set_sources([trade_source])
+
+        gen = algo.get_generator()
+        results = list(gen)
+        self.assertEqual(results[-2]['progress'], 1.0)

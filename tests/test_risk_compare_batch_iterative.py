@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,9 +21,9 @@ import pytz
 import numpy as np
 
 import zipline.finance.risk as risk
-from zipline.utils import factory
+import zipline.finance.trading as trading
+from zipline.protocol import DailyReturn
 
-from zipline.finance.trading import TradingEnvironment
 from test_risk import RETURNS
 
 
@@ -43,28 +43,17 @@ class RiskCompareIterativeToBatch(unittest.TestCase):
             tzinfo=pytz.utc)
         self.end_date = datetime.datetime(
             year=2006, month=12, day=31, tzinfo=pytz.utc)
-        self.benchmark_returns, self.treasury_curves = \
-            factory.load_market_data()
-
-        self.trading_env = TradingEnvironment(
-            self.benchmark_returns,
-            self.treasury_curves,
-            period_start=self.start_date,
-            period_end=self.end_date,
-            capital_base=1000.0
-        )
 
         self.oneday = datetime.timedelta(days=1)
 
     def test_risk_metrics_returns(self):
-        risk_metrics_refactor = risk.RiskMetricsIterative(
-            self.start_date, self.trading_env)
+        risk_metrics_refactor = risk.RiskMetricsIterative(self.start_date)
 
         todays_date = self.start_date
 
         cur_returns = []
         for i, ret in enumerate(RETURNS):
-            todays_return_obj = risk.DailyReturn(
+            todays_return_obj = DailyReturn(
                 todays_date,
                 ret
             )
@@ -73,15 +62,14 @@ class RiskCompareIterativeToBatch(unittest.TestCase):
 
             # Move forward day counter to next trading day
             todays_date += self.oneday
-            while not self.trading_env.is_trading_day(todays_date):
+            while not trading.environment.is_trading_day(todays_date):
                 todays_date += self.oneday
 
             try:
                 risk_metrics_original = risk.RiskMetricsBatch(
                     start_date=self.start_date,
                     end_date=todays_date,
-                    returns=cur_returns,
-                    trading_environment=self.trading_env
+                    returns=cur_returns
                 )
             except Exception as e:
                 #assert that when original raises exception, same

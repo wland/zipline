@@ -28,11 +28,33 @@ from numbers import Integral
 
 import pandas as pd
 
-from zipline import ndict
-from zipline.utils.tradingcalendar import non_trading_days
+from zipline.protocol import Event, DATASOURCE_TYPE
 from zipline.gens.utils import assert_sort_unframe_protocol, hash_args
+import zipline.finance.trading as trading
 
 log = logbook.Logger('Transform')
+
+
+class UnsupportedEventWindowFlagValue(Exception):
+    """
+    Error state when an EventWindow option is attempted to be set
+    to a value that is no longer supported by the library.
+
+    This is to help enforce deprecation of the market_aware and delta flags,
+    without completely removing it and breaking existing algorithms.
+    """
+    pass
+
+
+class InvalidWindowLength(Exception):
+    """
+    Error raised when the window length is unusable.
+    """
+    pass
+
+
+class TransformMessage(object):
+    pass
 
 
 class Passthrough(object):
@@ -55,7 +77,7 @@ class TransformMeta(type):
     calling Foo(*args, **kwargs) will return StatefulTransform(Foo,
     *args, **kwargs) instead of an instance of Foo. (Note that you can
     still recover an instance of a "raw" Foo by introspecting the
-    resulting StatefulTransform's 'state' field.
+    resulting StatefulTransform's 'state' field.)
     """
 
     def __call__(cls, *args, **kwargs):
@@ -80,12 +102,6 @@ class StatefulTransform(object):
         # Flag set inside the Passthrough transform class to signify special
         # behavior if we are being fed to merged_transforms.
         self.passthrough = hasattr(tnfm_class, 'PASSTHROUGH')
-
-        # Flags specifying how to append the calculated value.
-        # Merged is the default for ease of testing, but we use sequential
-        # in production.
-        self.sequential = False
-        self.merged = True
 
         # Create an instance of our transform class.
         if isinstance(tnfm_class, TransformMeta):
@@ -119,6 +135,10 @@ class StatefulTransform(object):
         # messages should only manipulate copies.
         log.info('Running StatefulTransform [%s]' % self.get_hash())
         for message in stream_in:
+            # we only handle TRADE events.
+            if (hasattr(message, 'type')
+                    and message.type != DATASOURCE_TYPE.TRADE):
+                continue
             # allow upstream generators to yield None to avoid
             # blocking.
             if message is None:
@@ -126,48 +146,11 @@ class StatefulTransform(object):
 
             assert_sort_unframe_protocol(message)
 
-            # This flag is set by by merged_transforms to ensure
-            # isolation of messages.
-            if self.merged:
-                message = deepcopy(message)
-
             tnfm_value = self.state.update(message)
 
-            # PASSTHROUGH flag means we want to keep all original
-            # values, plus append tnfm_id and tnfm_value. Used for
-            # preserving the original event fields when our output
-            # will be fed into a merge. Currently only Passthrough
-            # uses this flag.
-            if self.passthrough and self.merged:
-                out_message = message
-                out_message.tnfm_id = self.namestring
-                out_message.tnfm_value = tnfm_value
-                yield out_message
-
-            # If the merged flag is set, we create a new message
-            # containing just the tnfm_id, the event's datetime, and
-            # the calculated tnfm_value. This is the default behavior
-            # for a non-passthrough transform being fed into a merge.
-            elif self.merged:
-                out_message = ndict()
-                out_message.tnfm_id = self.namestring
-                out_message.tnfm_value = tnfm_value
-                out_message.dt = message.dt
-                yield out_message
-
-            # Sequential flag should be used to add a single new
-            # key-value pair to the event. The new key is this
-            # transform's namestring, and its value is the value
-            # returned by state.update(event). This is almost
-            # identical to the behavior of FORWARDER, except we
-            # compress the two calculated values (tnfm_id, and
-            # tnfm_value) into a single field. This mode is used by
-            # the sequential_transforms composite and is the default
-            # if no behavior is specified by the internal state class.
-            elif self.sequential:
-                out_message = message
-                out_message[self.namestring] = tnfm_value
-                yield out_message
+            out_message = message
+            out_message[self.namestring] = tnfm_value
+            yield out_message
 
         log.info('Finished StatefulTransform [%s]' % self.get_hash())
 
@@ -195,30 +178,32 @@ class EventWindow(object):
 
     def __init__(self, market_aware=True, window_length=None, delta=None):
 
-        self.market_aware = market_aware
         self.window_length = window_length
-        self.delta = delta
 
         self.ticks = deque()
 
-        # Market-aware mode only works with full-day windows.
-        if self.market_aware:
-            assert self.window_length and self.delta is None, \
-                "Market-aware mode only works with full-day windows."
-            self.all_holidays = deque(non_trading_days)
-            self.cur_holidays = deque()
-
-        # Non-market-aware mode requires a timedelta.
-        else:
-            assert self.delta and not self.window_length, \
-                "Non-market-aware mode requires a timedelta."
+        # Only Market-aware mode is now supported.
+        if not market_aware:
+            raise UnsupportedEventWindowFlagValue(
+                "Non-'market aware' mode is no longer supported."
+            )
+        if delta:
+            raise UnsupportedEventWindowFlagValue(
+                "delta values are no longer supported."
+            )
+        if self.window_length is None:
+            raise InvalidWindowLength("window_length must be provided")
+        if not isinstance(self.window_length, Integral):
+            raise InvalidWindowLength(
+                "window_length must be an integer-like number")
+        if self.window_length == 0:
+            raise InvalidWindowLength("window_length must be non-zero")
+        if self.window_length < 0:
+            raise InvalidWindowLength("window_length must be positive")
 
         # Set the behavior for dropping events from the back of the
         # event window.
-        if self.market_aware:
-            self.drop_condition = self.out_of_market_window
-        else:
-            self.drop_condition = self.out_of_delta
+        self.drop_condition = self.out_of_market_window
 
     @abstractmethod
     def handle_add(self, event):
@@ -232,6 +217,10 @@ class EventWindow(object):
         return len(self.ticks)
 
     def update(self, event):
+
+        if hasattr(event, 'type') and event.type != DATASOURCE_TYPE.TRADE:
+            return
+
         self.assert_well_formed(event)
         # Add new event and increment totals.
         self.ticks.append(deepcopy(event))
@@ -239,12 +228,7 @@ class EventWindow(object):
         # Subclasses should override handle_add to define behavior for
         # adding new ticks.
         self.handle_add(event)
-
-        if self.market_aware:
-            self.add_new_holidays(event.dt)
-
-        # Clear out any expired events. drop_condition changes depending
-        # on whether or not we are running in market_aware mode.
+        # Clear out any expired events.
         #
         #                              oldest               newest
         #                                |                    |
@@ -258,25 +242,13 @@ class EventWindow(object):
             # behavior for removing ticks.
             self.handle_remove(popped)
 
-    def add_new_holidays(self, newest):
-        # Add to our tracked window any untracked holidays that are
-        # older than our newest event. (newest should always be
-        # self.ticks[-1])
-        while len(self.all_holidays) > 0 and self.all_holidays[0] <= newest:
-            self.cur_holidays.append(self.all_holidays.popleft())
-
-    def drop_old_holidays(self, oldest):
-        # Drop from our tracked window any holidays that are older
-        # than our oldest tracked event. (oldest should always
-        # be self.ticks[0])
-        while len(self.cur_holidays) > 0 and self.cur_holidays[0] < oldest:
-            self.cur_holidays.popleft()
-
     def out_of_market_window(self, oldest, newest):
-        self.drop_old_holidays(oldest)
-        calendar_dates_between = (newest.date() - oldest.date()).days
-        holidays_between = len(self.cur_holidays)
-        trading_days_between = calendar_dates_between - holidays_between
+        oldest_index = \
+            trading.environment.trading_days.searchsorted(oldest)
+        newest_index = \
+            trading.environment.trading_days.searchsorted(newest)
+
+        trading_days_between = newest_index - oldest_index
 
         # "Put back" a day if oldest is earlier in its day than newest,
         # reflecting the fact that we haven't yet completed the last
@@ -285,9 +257,6 @@ class EventWindow(object):
             trading_days_between -= 1
 
         return trading_days_between >= self.window_length
-
-    def out_of_delta(self, oldest, newest):
-        return (newest - oldest) >= self.delta
 
     # All event windows expect to receive events with datetime fields
     # that arrive in sorted order.
@@ -326,7 +295,7 @@ class BatchTransform(EventWindow):
 
         ```
 
-    In you algorithm you would then have to instantiate
+    In your algorithm you would then have to instantiate
     this in the initialize() method:
     ```
     self.my_batch_transform = MyBatchTransform()
@@ -342,12 +311,11 @@ class BatchTransform(EventWindow):
 
     def __init__(self,
                  func=None,
-                 refresh_period=None,
+                 refresh_period=0,
                  window_length=None,
                  clean_nans=True,
                  sids=None,
                  fields=None,
-                 create_panel=True,
                  compute_only_full=True):
 
         """Instantiate new batch_transform object.
@@ -358,7 +326,7 @@ class BatchTransform(EventWindow):
                 with the data panel and all args and kwargs supplied
                 to the handle_data() call.
             refresh_period : int
-                Interval to call batch_transform function.
+                Interval to wait between advances in the window.
             window_length : int
                 How many days the trailing window should have.
             clean_nans : bool <default=True>
@@ -371,19 +339,12 @@ class BatchTransform(EventWindow):
                 Which fields to include in the moving window
                 (e.g. 'price'). If not supplied, fields will be
                 extracted from incoming events.
-            create_panel : bool <default=True>
-                If True, will create a pandas panel every refresh
-                period and pass it to the user-defined function.
-                If False, will pass the underlying deque reference
-                directly to the function which will be significantly
-                faster.
             compute_only_full : bool <default=True>
                 Only call the user-defined function once the window is
                 full. Returns None if window is not full yet.
         """
 
-        super(BatchTransform, self).__init__(True,
-                                             window_length=window_length)
+        super(BatchTransform, self).__init__(True, window_length=window_length)
 
         if func is not None:
             self.compute_transform_value = func
@@ -391,7 +352,6 @@ class BatchTransform(EventWindow):
             self.compute_transform_value = self.get_value
 
         self.clean_nans = clean_nans
-        self.create_panel = create_panel
         self.compute_only_full = compute_only_full
 
         self.sids = sids
@@ -406,12 +366,21 @@ class BatchTransform(EventWindow):
         self.window_length = window_length
         self.trading_days_since_update = 0
         self.trading_days_total = 0
+        self.window = None
 
         self.full = False
         self.last_dt = None
 
         self.updated = False
         self.cached = None
+        self.last_args = None
+        self.last_kwargs = None
+
+        # Data panel that provides bar information to fill in the window,
+        # when no bar ticks are available from the data source generator
+        # Used in universes that 'rollover', e.g. one that has a different
+        # set of stocks per quarter
+        self.supplemental_data = None
 
     def handle_data(self, data, *args, **kwargs):
         """
@@ -426,13 +395,28 @@ class BatchTransform(EventWindow):
         # couple of seconds shouldn't matter. We don't add it to
         # the data parameter, because it would mix dt with the
         # sid keys.
-        event = ndict()
+        event = Event()
         event.dt = max(dts)
-        event.data = data
+        event.data = {k: v.__dict__ for k, v in data.iteritems()
+                      # Need to check if data has a 'length' to filter
+                      # out sids without trade data available.
+                      # TODO: expose more of 'no trade available'
+                      # functionality to zipline
+                      if len(v)}
 
-        # append data frame to window. update() will call handle_add() and
-        # handle_remove() appropriately
-        self.update(event)
+        # only modify the trailing window if this is
+        # a new event. This is intended to make handle_data
+        # idempotent.
+        if event not in self.ticks:
+            # append data frame to window. update() will call handle_add() and
+            # handle_remove() appropriately, and self.updated
+            # will be modified based on the refresh_period
+            self.update(event)
+        else:
+            # we are recalculating based on an old event, so
+            # there is no change in the contents of the trailing
+            # window
+            self.updated = False
 
         # return newly computed or cached value
         return self.get_transform_value(*args, **kwargs)
@@ -473,7 +457,6 @@ class BatchTransform(EventWindow):
             # to call the user-defined batch-transform with the most
             # recent datapanel
             self.updated = True
-            self.trading_days_since_update = 0
         else:
             self.updated = False
 
@@ -489,25 +472,22 @@ class BatchTransform(EventWindow):
         """
         # This Panel data structure ultimately gets passed to the
         # user-overloaded get_value() method.
+        data_dict = {tick['dt']: tick['data'] for tick in self.ticks}
+        data = pd.Panel(data_dict, major_axis=self.field_names,
+                        minor_axis=self.sids,
+                        dtype='float')
 
-        # If sids are set, use those. Otherwise extract.
-        if self.sids is not None:
-            sids = self.sids
-        else:
-            sids = set.union(*[set(tick.data.keys()) for tick in self.ticks])
+        if self.supplemental_data:
+            # item will be a date stamp
+            for item in data.items:
+                try:
+                    data[item] = self.supplemental_data[item].combine_first(
+                        data[item])
+                except KeyError:
+                    # Only filling in data available in supplemental data.
+                    pass
 
-        dts = [tick.dt for tick in self.ticks]
-
-        data = pd.Panel(items=self.field_names, major_axis=dts,
-                        minor_axis=sids)
-
-        # Fill data panel
-        for tick in self.ticks:
-            dt = tick.dt
-            for sid in sids:
-                fields = tick.data[sid]
-                for field_name in self.field_names:
-                    data[field_name][sid].ix[dt] = fields[field_name]
+        data = data.swapaxes(0, 1)
 
         if self.clean_nans:
             # Fills in gaps of missing data during transform
@@ -515,9 +495,10 @@ class BatchTransform(EventWindow):
             # minute data because of illiquidity of one stock
             data = data.fillna(method='ffill')
 
-            # Drop any empty rows after the fill.
-            # This will drop a leading row of N/A
-            data = data.dropna(axis=1)
+        # Hold on to a reference to the data,
+        # so that it's easier to find the current data when stepping
+        # through with a debugger
+        self.curr_data = data
 
         return data
 
@@ -539,13 +520,26 @@ class BatchTransform(EventWindow):
         if self.compute_only_full and not self.full:
             return None
 
+        recalculate_needed = False
         if self.updated:
-            # Either create new pandas panel or pass ticks dequeue
-            # directly
-            data = self.get_data() if self.create_panel else self.ticks
-            self.cached = self.compute_transform_value(data, *args,
-                                                       **kwargs)
+            # Create new pandas panel
+            self.window = self.get_data()
+            # reset our counter for refresh_period
+            self.trading_days_since_update = 0
+            recalculate_needed = True
+        else:
+            recalculate_needed = \
+                args != self.last_args or kwargs != self.last_kwargs
 
+        if recalculate_needed:
+            self.cached = self.compute_transform_value(
+                self.window,
+                *args,
+                **kwargs
+            )
+
+        self.last_args = args
+        self.last_kwargs = kwargs
         return self.cached
 
     def __call__(self, f):

@@ -18,12 +18,20 @@ from logbook import Logger, Processor
 from collections import defaultdict
 
 from zipline import ndict
+from zipline.protocol import SIDData
 
 from zipline.finance.trading import TransactionSimulator
 from zipline.finance.performance import PerformanceTracker
 from zipline.gens.utils import hash_args
 
 log = Logger('Trade Simulation')
+
+
+class Order(object):
+
+    def __init__(self, initial_values=None):
+        if initial_values:
+            self.__dict__ = initial_values
 
 
 class TradeSimulationClient(object):
@@ -144,9 +152,9 @@ class AlgorithmSimulator(object):
         # ==============
 
         # The algorithm's universe as of our most recent event.
-        # We want an ndict that will have empty ndicts as default
+        # We want an ndict that will have empty objects as default
         # values on missing keys.
-        self.universe = ndict(internal=defaultdict(ndict))
+        self.universe = ndict(internal=defaultdict(SIDData))
 
         # We don't have a datetime for the current snapshot until we
         # receive a message.
@@ -169,7 +177,7 @@ class AlgorithmSimulator(object):
         Closure to pass into the user's algo to allow placing orders
         into the transaction simulator's dict of open orders.
         """
-        order = ndict({
+        order = Order({
             'dt': self.simulation_dt,
             'sid': sid,
             'amount': int(amount),
@@ -219,6 +227,10 @@ class AlgorithmSimulator(object):
                 else:
                     for event in snapshot:
                         for perf_message in event.perf_messages:
+                            # append current values of recorded vars
+                            # to emitted message
+                            perf_message['daily_perf']['recorded_vars'] =\
+                                self.algo.recorded_vars
                             yield perf_message
                         del event['perf_messages']
 
@@ -232,6 +244,8 @@ class AlgorithmSimulator(object):
                 self.perf_tracker.handle_simulation_end()
 
             for message in perf_messages:
+                message['daily_perf']['recorded_vars'] =\
+                    self.algo.recorded_vars
                 yield message
 
             yield risk_message
@@ -245,9 +259,18 @@ class AlgorithmSimulator(object):
 
         # Update our portfolio.
         self.algo.set_portfolio(event.portfolio)
+        # the portfolio is modified by each event passed into the
+        # performance tracker (prices and amounts can change).
+        # Performance tracker sends back an up-to-date portfolio
+        # with each event. However, we provide the portfolio to
+        # the algorithm via a setter method, rather than as part
+        # of the event data sent to handle_data. To avoid
+        # confusion, we remove it from the event here.
+        del event.portfolio
 
         # Update our knowledge of this event's sid
-        self.universe[event.sid].update(event.__dict__)
+        sid_data = self.universe[event.sid]
+        sid_data.__dict__.update(event.__dict__)
 
     def simulate_snapshot(self, date):
         """

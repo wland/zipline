@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -90,8 +90,9 @@ omitted).
     | ending_value  | the total market value of the positions held at the  |
     |               | end of the period                                    |
     +---------------+------------------------------------------------------+
-    | capital_used  | the net capital consumed (positive means spent) by   |
-    |               | buying and selling securities in the period          |
+    | cash_flow     | the cash flow in the period (negative means spent)   |
+    |               | from buying and selling securities in the period.    |
+    |               | Includes dividend payments in the period as well.    |
     +---------------+------------------------------------------------------+
     | starting_value| the total market value of the positions held at the  |
     |               | start of the period                                  |
@@ -140,6 +141,7 @@ import numpy as np
 
 import zipline.protocol as zp
 import zipline.finance.risk as risk
+import zipline.finance.trading as trading
 
 log = logbook.Logger('Performance')
 
@@ -156,28 +158,28 @@ class PerformanceTracker(object):
 
     """
 
-    def __init__(self, trading_environment):
+    def __init__(self, sim_params):
 
-        self.trading_environment = trading_environment
-        self.trading_day = datetime.timedelta(hours=6, minutes=30)
+        self.sim_params = sim_params
         self.started_at = datetime.datetime.utcnow().replace(tzinfo=pytz.utc)
 
-        self.period_start = self.trading_environment.period_start
-        self.period_end = self.trading_environment.period_end
-        self.last_close = self.trading_environment.last_close
-        self.market_open = self.trading_environment.first_open
-        self.market_close = self.market_open + self.trading_day
+        self.period_start = self.sim_params.period_start
+        self.period_end = self.sim_params.period_end
+        self.last_close = self.sim_params.last_close
+        first_day = self.sim_params.first_open
+        self.market_open, self.market_close = \
+            trading.environment.get_open_and_close(first_day)
         self.progress = 0.0
-        self.total_days = self.trading_environment.days_in_period
+        self.total_days = self.sim_params.days_in_period
         # one indexed so that we reach 100%
         self.day_count = 0.0
-        self.capital_base = self.trading_environment.capital_base
+        self.capital_base = self.sim_params.capital_base
         self.returns = []
         self.txn_count = 0
         self.event_count = 0
         self.last_dict = None
-        self.cumulative_risk_metrics = risk.RiskMetricsIterative(
-            self.period_start, self.trading_environment)
+        self.cumulative_risk_metrics = \
+            risk.RiskMetricsIterative(self.period_start)
 
         # this performance period will span the entire simulation.
         self.cumulative_performance = PerformancePeriod(
@@ -185,7 +187,12 @@ class PerformanceTracker(object):
             self.capital_base,
             # the cumulative period will be calculated over the entire test.
             self.period_start,
-            self.period_end
+            self.period_end,
+            # don't save the transactions for the cumulative
+            # period
+            keep_transactions=False,
+            # don't serialize positions for cumualtive period
+            serialize_positions=False
         )
 
         # this performance period will span just the current market day
@@ -195,14 +202,14 @@ class PerformanceTracker(object):
             # the daily period will be calculated for the market day
             self.market_open,
             self.market_close,
-            # save the transactions for the daily periods
-            keep_transactions=True
+            keep_transactions=True,
+            serialize_positions=True
         )
 
     def __repr__(self):
         return "%s(%r)" % (
             self.__class__.__name__,
-            {'trading_environment': self.trading_environment})
+            {'simulation parameters': self.sim_params})
 
     def transform(self, stream_in):
         """
@@ -212,13 +219,15 @@ class PerformanceTracker(object):
             new_snapshot = []
 
             for event in snapshot:
-                event.perf_messages = self.process_event(event)
-                event.portfolio = self.get_portfolio()
+                messages = self.process_event(event)
+                if messages is not None:
+                    event.perf_messages = messages
+                    event.portfolio = self.get_portfolio()
 
-                del event['TRANSACTION']
-                new_snapshot.append(event)
+                    new_snapshot.append(event)
 
-            yield date, new_snapshot
+            if len(new_snapshot) > 0:
+                yield date, new_snapshot
 
     def get_portfolio(self):
         return self.cumulative_performance.as_portfolio()
@@ -241,21 +250,29 @@ class PerformanceTracker(object):
 
     def process_event(self, event):
 
-        messages = []
-
+        messages = None
         self.event_count += 1
 
-        while event.dt > self.market_close:
-            messages.append(self.handle_market_close())
+        if event.type == zp.DATASOURCE_TYPE.TRADE:
+            messages = []
+            while event.dt > self.market_close and event.dt < self.last_close:
+                messages.append(self.handle_market_close())
 
-        if event.TRANSACTION:
-            self.txn_count += 1
-            self.cumulative_performance.execute_transaction(event.TRANSACTION)
-            self.todays_performance.execute_transaction(event.TRANSACTION)
+            if event.TRANSACTION:
+                self.txn_count += 1
+                self.cumulative_performance.execute_transaction(
+                    event.TRANSACTION
+                )
+                self.todays_performance.execute_transaction(event.TRANSACTION)
 
-        #update last sale
-        self.cumulative_performance.update_last_sale(event)
-        self.todays_performance.update_last_sale(event)
+            #update last sale
+            self.cumulative_performance.update_last_sale(event)
+            self.todays_performance.update_last_sale(event)
+            del event['TRANSACTION']
+
+        elif event.type == zp.DATASOURCE_TYPE.DIVIDEND:
+            self.cumulative_performance.add_dividend(event)
+            self.todays_performance.add_dividend(event)
 
         #calculate performance as of last trade
         self.cumulative_performance.calculate_performance()
@@ -264,10 +281,12 @@ class PerformanceTracker(object):
         return messages
 
     def handle_market_close(self):
-
         # add the return results from today to the list of DailyReturn objects.
         todays_date = self.market_close.replace(hour=0, minute=0, second=0)
-        todays_return_obj = risk.DailyReturn(
+        self.cumulative_performance.update_dividends(todays_date)
+        self.todays_performance.update_dividends(todays_date)
+
+        todays_return_obj = zp.DailyReturn(
             todays_date,
             self.todays_performance.returns
         )
@@ -294,22 +313,22 @@ class PerformanceTracker(object):
             return daily_update
 
         #move the market day markers forward
-        next_open = self.trading_environment.next_trading_day(self.market_open)
-        if next_open is None:
-            raise Exception(
-                "Attempt to backtest beyond available history. \
-Last successful date: %s" % self.market_open)
-
-        # next_open is a midnight date, but we want the time too
-        self.market_open = next_open.replace(hour=self.market_open.hour,
-                                             minute=self.market_open.minute,
-                                             second=self.market_open.second)
-        self.market_close = self.market_open + self.trading_day
+        self.market_open, self.market_close = \
+            trading.environment.next_open_and_close(self.market_open)
 
         # Roll over positions to current day.
         self.todays_performance.rollover()
         self.todays_performance.period_open = self.market_open
         self.todays_performance.period_close = self.market_close
+
+        # The dividend calculation for the daily needs to be made
+        # after the rollover. midnight_between is the last midnight
+        # hour between the close of markets and the next open. To
+        # make sure midnight_between matches identically with
+        # dividend data dates, it is in UTC.
+        midnight_between = self.market_open.replace(hour=0, minute=0, second=0)
+        self.cumulative_performance.update_dividends(midnight_between)
+        self.todays_performance.update_dividends(midnight_between)
 
         return daily_update
 
@@ -322,7 +341,6 @@ Last successful date: %s" % self.market_open)
         # not trigger an end of day, so we trigger the final
         # market close(s) here
         perf_messages = []
-
         while self.last_close > self.market_close:
             perf_messages.append(self.handle_market_close())
 
@@ -331,14 +349,11 @@ Last successful date: %s" % self.market_open)
         log_msg = "Simulated {n} trading days out of {m}."
         log.info(log_msg.format(n=int(self.day_count), m=self.total_days))
         log.info("first open: {d}".format(
-            d=self.trading_environment.first_open))
+            d=self.sim_params.first_open))
         log.info("last close: {d}".format(
-            d=self.trading_environment.last_close))
+            d=self.sim_params.last_close))
 
-        self.risk_report = risk.RiskReport(
-            self.returns,
-            self.trading_environment
-        )
+        self.risk_report = risk.RiskReport(self.returns, self.sim_params)
 
         risk_dict = self.risk_report.to_dict()
         return perf_messages, risk_dict
@@ -352,6 +367,39 @@ class Position(object):
         self.cost_basis = 0.0  # per share
         self.last_sale_price = 0.0
         self.last_sale_date = 0.0
+        self.dividends = []
+
+    def update_dividends(self, midnight_utc):
+        """
+        midnight_utc is the 0 hour for the current (not yet open) trading day.
+        This method will be invoked at the end of the market
+        close handling, before the next market open.
+        """
+        payment = 0.0
+        unpaid_dividends = []
+        for dividend in self.dividends:
+            if midnight_utc == dividend.ex_date:
+                # if we own shares at midnight of the div_ex date
+                # we are entitled to the dividend.
+                dividend.amount_on_ex_date = self.amount
+                if dividend.net_amount:
+                    dividend.payment = self.amount * dividend.net_amount
+                else:
+                    dividend.payment = self.amount * dividend.gross_amount
+
+            if midnight_utc == dividend.pay_date:
+                # if it is the payment date, include this
+                # dividend's actual payment (calculated on
+                # ex_date)
+                payment += dividend.payment
+            else:
+                unpaid_dividends.append(dividend)
+
+        self.dividends = unpaid_dividends
+        return payment
+
+    def add_dividend(self, dividend):
+        self.dividends.append(dividend)
 
     def update(self, txn):
         if(self.sid != txn.sid):
@@ -402,13 +450,14 @@ class PerformancePeriod(object):
             starting_cash,
             period_open=None,
             period_close=None,
-            keep_transactions=False):
+            keep_transactions=True,
+            serialize_positions=True):
 
         self.period_open = period_open
         self.period_close = period_close
 
         self.ending_value = 0.0
-        self.period_capital_used = 0.0
+        self.period_cash_flow = 0.0
         self.pnl = 0.0
         #sid => position object
         self.positions = positiondict()
@@ -435,11 +484,12 @@ class PerformancePeriod(object):
         # So as not to avoid creating a new object for each event
         self._portfolio_store = zp.Portfolio()
         self._positions_store = zp.Positions()
+        self.serialize_positions = serialize_positions
 
     def rollover(self):
         self.starting_value = self.ending_value
         self.starting_cash = self.ending_cash
-        self.period_capital_used = 0.0
+        self.period_cash_flow = 0.0
         self.pnl = 0.0
         self.processed_transactions = []
         self.cumulative_capital_used = 0.0
@@ -457,11 +507,42 @@ class PerformancePeriod(object):
                 self._position_last_sale_prices, [0])
         return index
 
+    def add_dividend(self, div):
+        # The dividend is received on midnight of the dividend
+        # declared date. We calculate the dividends based on the amount of
+        # stock owned on midnight of the ex dividend date. However, the cash
+        # is not dispersed until the payment date, which is
+        # included in the event.
+        self.positions[div.sid].add_dividend(div)
+
+    def update_dividends(self, todays_date):
+        """
+        Check the payment date and ex date against today's date
+        to detrmine if we are owed a dividend payment or if the
+        payment has been disbursed.
+        """
+        cash_payments = 0.0
+        for sid, pos in self.positions.iteritems():
+            cash_payments += pos.update_dividends(todays_date)
+
+        # credit our cash balance with the dividend payments, or
+        # if we are short, debit our cash balance with the
+        # payments.
+        self.period_cash_flow += cash_payments
+        # debit our cumulative cash spent with the dividend
+        # payments, or credit our cumulative cash spent if we are
+        # short the stock.
+        self.cumulative_capital_used -= cash_payments
+
+        # recalculate performance, including the dividend
+        # paymtents
+        self.calculate_performance()
+
     def calculate_performance(self):
         self.ending_value = self.calculate_positions_value()
 
         total_at_start = self.starting_cash + self.starting_value
-        self.ending_cash = self.starting_cash + self.period_capital_used
+        self.ending_cash = self.starting_cash + self.period_cash_flow
         total_at_end = self.ending_cash + self.ending_value
 
         self.pnl = total_at_end - total_at_start
@@ -478,7 +559,7 @@ class PerformancePeriod(object):
         index = self.index_for_position(txn.sid)
         self._position_amounts[index] = position.amount
 
-        self.period_capital_used += -1 * txn.price * txn.amount
+        self.period_cash_flow += -1 * txn.price * txn.amount
 
         # Max Leverage
         # ---------------
@@ -522,7 +603,9 @@ class PerformancePeriod(object):
     def __core_dict(self):
         rval = {
             'ending_value': self.ending_value,
-            'capital_used': self.period_capital_used,
+            # this field is renamed to capital_used for backward
+            # compatibility.
+            'capital_used': self.period_cash_flow,
             'starting_value': self.starting_value,
             'starting_cash': self.starting_cash,
             'ending_cash': self.ending_cash,
@@ -544,12 +627,14 @@ class PerformancePeriod(object):
         period. See header comments for a detailed description.
         """
         rval = self.__core_dict()
-        positions = self.get_positions_list()
-        rval['positions'] = positions
+
+        if self.serialize_positions:
+            positions = self.get_positions_list()
+            rval['positions'] = positions
 
         # we want the key to be absent, not just empty
         if self.keep_transactions:
-            transactions = [x.as_dict() for x in self.processed_transactions]
+            transactions = [x.__dict__ for x in self.processed_transactions]
             rval['transactions'] = transactions
 
         return rval
@@ -567,7 +652,9 @@ class PerformancePeriod(object):
         # as_portfolio is called in an inner loop,
         # so repeated object creation becomes too expensive
         portfolio = self._portfolio_store
-        portfolio.capital_used = self.period_capital_used,
+        # maintaining the old name for the portfolio field for
+        # backward compatibility
+        portfolio.capital_used = self.period_cash_flow
         portfolio.starting_cash = self.starting_cash
         portfolio.portfolio_value = self.ending_cash + self.ending_value
         portfolio.pnl = self.pnl
@@ -583,6 +670,7 @@ class PerformancePeriod(object):
         positions = self._positions_store
 
         for sid, pos in self.positions.iteritems():
+
             if sid not in positions:
                 positions[sid] = zp.Position(sid)
             position = positions[sid]
@@ -595,8 +683,8 @@ class PerformancePeriod(object):
     def get_positions_list(self):
         positions = []
         for sid, pos in self.positions.iteritems():
-            cur = pos.to_dict()
-            positions.append(cur)
+            if pos.amount != 0:
+                positions.append(pos.to_dict())
         return positions
 
 

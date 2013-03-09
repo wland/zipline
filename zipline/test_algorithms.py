@@ -215,6 +215,15 @@ class TimeoutAlgorithm(TradingAlgorithm):
             time.sleep(100)
         pass
 
+
+class RecordAlgorithm(TradingAlgorithm):
+    def initialize(self):
+        self.incr = 0
+
+    def handle_data(self, data):
+        self.incr += 1
+        self.record(incr=self.incr)
+
 from zipline.algorithm import TradingAlgorithm
 from zipline.transforms import BatchTransform, batch_transform
 from zipline.transforms import MovingAverage
@@ -237,7 +246,9 @@ class TestRegisterTransformAlgorithm(TradingAlgorithm):
 
 class ReturnPriceBatchTransform(BatchTransform):
     def get_value(self, data):
-        assert data.shape[1] == self.window_length
+        assert data.shape[1] == self.window_length, \
+            "data shape={0} does not equal window_length={1} for data={2}".\
+            format(data.shape[1], self.window_length, data)
         return data.price
 
 
@@ -254,6 +265,17 @@ def return_args_batch_decorator(data, *args, **kwargs):
 @batch_transform
 def return_data(data, *args, **kwargs):
     return data
+
+
+@batch_transform
+def uses_ufunc(data, *args, **kwargs):
+    # ufuncs like np.log should not crash
+    return np.log(data)
+
+
+@batch_transform
+def price_multiple(data, multiplier, extra_arg=1):
+    return data.price * multiplier * extra_arg
 
 
 class BatchTransformAlgorithm(TradingAlgorithm):
@@ -293,12 +315,6 @@ class BatchTransformAlgorithm(TradingAlgorithm):
             clean_nans=False
         )
 
-        self.return_price_market_aware = ReturnPriceBatchTransform(
-            refresh_period=self.refresh_period,
-            window_length=self.window_length,
-            clean_nans=False
-        )
-
         self.return_arbitrary_fields = return_data(
             refresh_period=self.refresh_period,
             window_length=self.window_length,
@@ -331,16 +347,22 @@ class BatchTransformAlgorithm(TradingAlgorithm):
             clean_nans=True
         )
 
-        self.return_ticks = return_data(
-            refresh_period=self.refresh_period,
-            window_length=self.window_length,
-            create_panel=False
-        )
-
         self.return_not_full = return_data(
             refresh_period=0,
             window_length=self.window_length,
             compute_only_full=False
+        )
+
+        self.uses_ufunc = uses_ufunc(
+            refresh_period=self.refresh_period,
+            window_length=self.window_length,
+            clean_nans=False
+        )
+
+        self.price_multiple = price_multiple(
+            refresh_period=self.refresh_period,
+            window_length=self.window_length,
+            clean_nans=False
         )
 
         self.iter = 0
@@ -355,10 +377,32 @@ class BatchTransformAlgorithm(TradingAlgorithm):
         self.history_return_args.append(
             self.return_args_batch.handle_data(
                 data, *self.args, **self.kwargs))
-        self.history_return_ticks.append(
-            self.return_ticks.handle_data(data))
         self.history_return_not_full.append(
             self.return_not_full.handle_data(data))
+        self.uses_ufunc.handle_data(data)
+
+        # check that calling transforms with the same arguments
+        # is idempotent
+        self.price_multiple.handle_data(data, 1, extra_arg=1)
+
+        if self.price_multiple.full:
+            pre = len(self.price_multiple.ticks)
+            result1 = self.price_multiple.handle_data(data, 1, extra_arg=1)
+            post = len(self.price_multiple.ticks)
+            assert pre == post, "batch transform is appending redundant events"
+            result2 = self.price_multiple.handle_data(data, 1, extra_arg=1)
+            assert result1 is result2, "batch transform is not idempotent"
+
+            # check that calling transform with the same data, but
+            # different supplemental arguments results in new
+            # results.
+            result3 = self.price_multiple.handle_data(data, 2, extra_arg=1)
+            assert result1 is not result3, \
+                "batch transform is not updating for new args"
+
+            result4 = self.price_multiple.handle_data(data, 1, extra_arg=2)
+            assert result1 is not result4,\
+                "batch transform is not updating for new kwargs"
 
         new_data = deepcopy(data)
         for sid in new_data:

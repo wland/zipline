@@ -1,16 +1,20 @@
 Zipline
 =======
 
-Zipline is a financial backtester for trading algorithms written in
-Python. The system is fundamentally event-driven and a close
+Zipline is a Pythonic algorithmic trading library.
+The system is fundamentally event-driven and a close
 approximation of how live-trading systems operate.
+Currently, backtesting is well supported, but the intent is
+to develop the library for both paper and live trading,
+so that the same logic used for backtesting can be applied
+to the market.
 
 Zipline is currently used in production as the backtesting engine
 powering Quantopian (https://www.quantopian.com) -- a free, community-centered
 platform that allows development and real-time backtesting of trading
 algorithms in the web browser.
 
-Want to contribute? See our [open requests](https://github.com/quantopian/zipline/wiki/Contribution-Requests) 
+Want to contribute? See our [open requests](https://github.com/quantopian/zipline/wiki/Contribution-Requests)
 and our [general guidelines](https://github.com/quantopian/zipline#contributions) below.
 
 Discussion and Help
@@ -63,6 +67,9 @@ Dependencies
 * msgpack-python
 * Logbook
 * blist
+* requests
+* delorean
+* iso8601
 
 Quickstart
 ==========
@@ -124,9 +131,11 @@ Credits
 --------
 Thank you for all the help so far!
 
+- @rday for sortino ratio, information ratio, and exponential moving average transform
 - @snth
 - @yinhm for integrating zipline with @yinhm/datafeed
 - [Jeremiah Lowin](http://www.lowindata.com) for teaching us the nuances of Sharpe and Sortino Ratios
+- Brian Cappello
 - Quantopian Team
 
 (alert us if we've inadvertantly missed listing you here!)
