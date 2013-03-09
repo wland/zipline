@@ -128,92 +128,6 @@ class TradingEnvironment(object):
         self.first_trading_day = next(self.trading_day_map.iterkeys())
         self.last_trading_day = next(reversed(self.trading_day_map))
 
-<<<<<<< HEAD
-        ''' this day is about mid december, but live trade is now and future ! ----------------------------------
-        assert self.period_start <= self.last_trading_day, \
-            "Period start falls after the last known trading day."
-        '''
-        assert self.period_end >= self.first_trading_day, \
-            "Period end falls before the first known trading day."
-
-        self.first_open = self.calculate_first_open()
-        self.last_close = self.calculate_last_close()
-
-        self.prior_day_open = self.calculate_prior_day_open()
-
-    def __repr__(self):
-        return "%s(%r)" % (
-            self.__class__.__name__,
-            {'first_open': self.first_open,
-             'last_close': self.last_close
-             })
-
-    def calculate_first_open(self):
-        """
-        Finds the first trading day on or after self.period_start.
-        """
-        first_open = self.period_start
-        one_day = datetime.timedelta(days=1)
-
-        try:
-            #while first_open.isoweekday() > 5:
-            while not self.is_trading_day(first_open):
-                first_open = first_open + one_day
-        except:
-            import ipdb as pdb
-            pdb.set_trace()
-            first_open = datetime.date.today()
-
-        first_open = self.set_NYSE_time(first_open, 9, 30)
-        return first_open
-
-    def calculate_prior_day_open(self):
-        """
-        Finds the first trading day open that falls at least a day
-        before period_start.
-        """
-        one_day = datetime.timedelta(days=1)
-        first_open = self.period_start - one_day
-
-        if first_open <= self.first_trading_day:
-            log.warn("Cannot calculate prior day open.")
-            return self.period_start
-
-        while not self.is_trading_day(first_open):
-            first_open = first_open - one_day
-
-        first_open = self.set_NYSE_time(first_open, 9, 30)
-        return first_open
-
-    def calculate_last_close(self):
-        """
-        Finds the last trading day on or before self.period_end
-        """
-        last_close = self.period_end
-        one_day = datetime.timedelta(days=1)
-
-        while not self.is_trading_day(last_close):
-            last_close = last_close - one_day
-
-        last_close = self.set_NYSE_time(last_close, 16, 00)
-
-        return last_close
-
-    #TODO: add other exchanges and timezones...
-    def set_NYSE_time(self, dt, hour, minute):
-        naive = datetime.datetime(
-            year=dt.year,
-            month=dt.month,
-            day=dt.day
-        )
-        local = pytz.timezone('US/Eastern')
-        local_dt = naive.replace(tzinfo=local)
-        # set the clock to the opening bell in NYC time.
-        local_dt = local_dt.replace(hour=hour, minute=minute)
-        # convert to UTC
-        utc_dt = local_dt.astimezone(pytz.utc)
-        return utc_dt
-=======
     def __enter__(self, *args, **kwargs):
         global environment
         self.prev_environment = environment
@@ -228,7 +142,6 @@ class TradingEnvironment(object):
         # signal that any exceptions need to be propagated up the
         # stack.
         return False
->>>>>>> upstream/master
 
     def normalize_date(self, test_date):
         return datetime.datetime(
