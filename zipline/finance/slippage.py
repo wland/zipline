@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ import math
 
 from functools import partial
 
+import numpy as np
+
 from logbook import Processor
 
 
@@ -34,8 +36,8 @@ def transact_stub(slippage, commission, event, open_orders):
     with Processor(inject_algo_dt).threadbound():
 
         transaction = slippage.simulate(event, open_orders)
-        if transaction and transaction.amount != 0:
-            direction = abs(transaction.amount) / transaction.amount
+        if transaction and not np.allclose(transaction.amount, 0):
+            direction = math.copysign(1, transaction.amount)
             per_share, total_commission = commission.calculate(transaction)
             transaction.price = transaction.price + (per_share * direction)
             transaction.commission = total_commission
@@ -82,7 +84,7 @@ class VolumeShareSlippage(object):
 
     def simulate(self, event, open_orders):
 
-        if(event.volume == 0):
+        if np.allclose(event.volume, 0):
             #there are zero volume events bc some stocks trade
             #less frequently than once per minute.
             return None
@@ -101,14 +103,13 @@ class VolumeShareSlippage(object):
         total_order = 0
         simulated_amount = 0
         simulated_impact = 0.0
-        direction = 1.0
 
         for order in current_orders:
 
             open_amount = order.amount - order.filled
 
-            if(open_amount != 0):
-                direction = open_amount / math.fabs(open_amount)
+            if not np.allclose(open_amount, 0):
+                direction = math.copysign(1, open_amount)
             else:
                 direction = 1
 
@@ -117,7 +118,7 @@ class VolumeShareSlippage(object):
             volume_share = min(direction * (desired_order) / event.volume,
                                self.volume_limit)
 
-            if volume_share == self.volume_limit:
+            if np.allclose(volume_share, self.volume_limit):
                 simulated_amount = \
                     int(self.volume_limit * event.volume * direction)
             else:
@@ -132,7 +133,7 @@ class VolumeShareSlippage(object):
             total_order = simulated_amount
 
             # we cap the volume share at configured % of a trade
-            if volume_share == self.volume_limit:
+            if np.allclose(volume_share, self.volume_limit):
                 break
 
         filled_orders = [x for x in orders
@@ -171,10 +172,10 @@ class FixedSlippage(object):
         for order in orders:
             amount += order.amount
 
-        if(amount == 0):
+        if np.allclose(amount, 0):
             return
 
-        direction = amount / math.fabs(amount)
+        direction = math.copysign(1, amount)
 
         txn = create_transaction(
             event.sid,
