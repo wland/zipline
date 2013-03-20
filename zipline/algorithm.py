@@ -23,10 +23,6 @@ from datetime import datetime
 from itertools import groupby
 from operator import attrgetter
 
-import sys
-import os
-sys.path.append(os.environ['QTRADE'])
-from neuronquant.data.ziplinesource import DataLiveSource
 from zipline.sources import DataFrameSource, DataPanelSource
 
 from zipline.utils.factory import create_simulation_parameters
@@ -185,8 +181,15 @@ class TradingAlgorithm(object):
             # if DataFrame provided, wrap in DataFrameSource
             source = DataFrameSource(source)
         elif isinstance(source, dict):
-            assert start is not None and end is not None
-            source = DataLiveSource(source, start=start, end=end)
+            #NOTE More like a hack before better understanding
+            # Live backtest only required informations stored in a dictionnary
+            assert 'stream_source' in source
+            if source['stream_source'] == 'forex':
+                from neuronquant.data.ziplinesources.live.forex import DataLiveSource
+            else:
+                from neuronquant.data.ziplinesources.live.equities import DataLiveSource
+            source = DataLiveSource(source)
+            #source = DataLiveSource(source, start=start, end=end)
         elif isinstance(source, pd.Panel):
             source = DataPanelSource(source)
 

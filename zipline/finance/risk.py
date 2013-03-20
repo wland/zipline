@@ -67,6 +67,8 @@ import numpy.linalg as la
 import zipline.finance.trading as trading
 from zipline.utils.date_utils import epoch_now
 
+from neuronquant.data.remote import Fetcher
+import neuronquant.utils.datautils as datautils
 
 log = logbook.Logger('Risk')
 
@@ -466,20 +468,43 @@ class RiskMetricsIterative(RiskMetricsBase):
         self.last_dt = start_date
         self.trading_days = 0
 
+        #TODO Here an update function, benchmark from start_date to now
         self.all_benchmark_returns = [
             x for x in trading.environment.benchmark_returns
             if x.date >= self.start_date
         ]
+        ## Here -----------------------------------------------------------------------------------------
+        self.fetcher = Fetcher()
+
+    def download_benchmark(self, event):
+        code = str(event.returns)
+        assert code in datautils.Exchange
+        ''' Get the current value of the index associated with code '''
+        perc_return = self.fetcher.get_stock_snapshot(datautils.Exchange[code]['google_symbol'],
+                                                         datautils.Exchange[code]['google_market'],
+                                                         light=False)
+        assert perc_return
+        #TODO Some check betwen received date and perc_return['trade_date_utc']
+        return float(perc_return[datautils.Exchange[code]['google_symbol']]['perc_change']) / 100.0
 
     def update(self, market_close, returns_in_period):
+        import ipdb; ipdb.set_trace()
         if trading.environment.is_trading_day(self.end_date):
             self.algorithm_returns.append(returns_in_period)
-            import ipdb as pdb
             try:
+                if self.all_benchmark_returns[0].returns >= 1001:
+                    # Fake value set at initialization: Live trading
+                    bench_snapshot = self.download_benchmark(self.all_benchmark_returns.pop(0))
+                else:
+                    # Normal backtest, used data downloaded at initialization
+                    bench_snapshot = self.all_benchmark_returns.pop(0).returns
                 self.benchmark_returns.append(
-                    self.all_benchmark_returns.pop(0).returns)
+                    #self.all_benchmark_returns.pop(0).returns
+                    bench_snapshot
+                )
+                ## Here -----------------------------------------------------------------------------------------
             except:
-                pdb.set_trace()
+                import ipdb; ipdb.set_trace()
             self.trading_days += 1
             self.update_compounded_log_returns()
 
