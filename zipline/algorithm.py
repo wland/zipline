@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,6 +23,12 @@ from datetime import datetime
 from itertools import groupby
 from operator import attrgetter
 
+from zipline.errors import (
+    UnsupportedSlippageModel,
+    OverrideSlippagePostInit,
+    UnsupportedCommissionModel,
+    OverrideCommissionPostInit
+)
 from zipline.sources import DataFrameSource, DataPanelSource
 
 from zipline.utils.factory import create_simulation_parameters
@@ -41,7 +47,6 @@ from zipline.gens.composites import (
     alias_dt
 )
 from zipline.gens.tradesimulation import TradeSimulationClient as tsc
-from zipline import MESSAGES
 
 DEFAULT_CAPITAL_BASE = float("1.0e5")
 
@@ -78,9 +83,7 @@ class TradingAlgorithm(object):
             capital_base : float <default: 1.0e5>
                How much capital to start with.
         """
-        self.done = False
         self.order = None
-        self.frame_count = 0
         self._portfolio = None
         self.datetime = None
 
@@ -129,13 +132,13 @@ class TradingAlgorithm(object):
         self.with_alias_dt = alias_dt(self.with_tnfms)
         # Group together events with the same dt field. This depends on the
         # events already being sorted.
-        self.grouped_by_date = groupby(self.with_alias_dt, attrgetter('dt'))
+        self.grouped_by_dt = groupby(self.with_alias_dt, attrgetter('dt'))
         self.trading_client = tsc(self, sim_params)
 
         transact_method = transact_partial(self.slippage, self.commission)
         self.set_transact(transact_method)
 
-        return self.trading_client.simulate(self.grouped_by_date)
+        return self.trading_client.simulate(self.grouped_by_dt)
 
     def get_generator(self):
         """
@@ -193,25 +196,28 @@ class TradingAlgorithm(object):
         elif isinstance(source, pd.Panel):
             source = DataPanelSource(source)
 
-        # If values not set, try to extract from source.
-        if self.sim_params is None and sim_params is None:
-            start = source.start
-            end = source.end
-
         if not isinstance(source, (list, tuple)):
             self.sources = [source]
         else:
             self.sources = source
 
-        if sim_params:
-            self.sim_params = sim_params
+        # Check for override of sim_params.
+        # If it isn't passed to this function,
+        # use the default params set with the algorithm.
+        # Else, we create simulation parameters using the start and end of the
+        # source provided.
+        if not sim_params:
+            if not self.sim_params:
+                start = source.start
+                end = source.end
 
-        if not self.sim_params:
-            self.sim_params = create_simulation_parameters(
-                start=start,
-                end=end,
-                capital_base=self.capital_base
-            )
+                sim_params = create_simulation_parameters(
+                    start=start,
+                    end=end,
+                    capital_base=self.capital_base
+                )
+            else:
+                sim_params = self.sim_params
 
         # Create transforms by wrapping them into StatefulTransforms
         self.transforms = []
@@ -226,14 +232,16 @@ class TradingAlgorithm(object):
             self.transforms.append(sf)
 
         # create transforms and zipline
-        self.gen = self._create_generator(self.sim_params)
+        self.gen = self._create_generator(sim_params)
 
         # loop through simulated_trading, each iteration returns a
-        # perf ndict
+        # perf dictionary
         perfs = list(self.gen)
 
-        # convert perf ndict to pandas dataframe
-        return self._create_daily_stats(perfs)
+        # convert perf dict to pandas dataframe
+        daily_stats = self._create_daily_stats(perfs)
+
+        return daily_stats
 
     def _create_daily_stats(self, perfs):
         # create daily and cumulative stats dataframe
@@ -316,10 +324,6 @@ class TradingAlgorithm(object):
             "Algorithm should have a utc datetime"
         return date_copy
 
-    def init(self, *args, **kwargs):
-        """Called from constructor."""
-        pass
-
     def set_transact(self, transact):
         """
         Set the method that will be called to create a
@@ -328,18 +332,18 @@ class TradingAlgorithm(object):
         self.trading_client.ordering_client.transact = transact
 
     def set_slippage(self, slippage):
-        assert isinstance(slippage, (VolumeShareSlippage, FixedSlippage)), \
-            MESSAGES.ERRORS.UNSUPPORTED_SLIPPAGE_MODEL
+        if not isinstance(slippage, (VolumeShareSlippage, FixedSlippage)):
+            raise UnsupportedSlippageModel()
         if self.initialized:
-            raise Exception(MESSAGES.ERRORS.OVERRIDE_SLIPPAGE_POST_INIT)
+            raise OverrideSlippagePostInit()
         self.slippage = slippage
 
     def set_commission(self, commission):
-        assert isinstance(commission, (PerShare, PerTrade)), \
-            MESSAGES.ERRORS.UNSUPPORTED_COMMISSION_MODEL
+        if not isinstance(commission, (PerShare, PerTrade)):
+            raise UnsupportedCommissionModel()
 
         if self.initialized:
-            raise Exception(MESSAGES.ERRORS.OVERRIDE_COMMISSION_POST_INIT)
+            raise OverrideCommissionPostInit()
         self.commission = commission
 
     def set_sources(self, sources):
