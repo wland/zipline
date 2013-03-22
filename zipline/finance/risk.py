@@ -488,7 +488,6 @@ class RiskMetricsIterative(RiskMetricsBase):
         return float(perc_return[datautils.Exchange[code]['google_symbol']]['perc_change']) / 100.0
 
     def update(self, market_close, returns_in_period):
-        import ipdb; ipdb.set_trace()
         if trading.environment.is_trading_day(self.end_date):
             self.algorithm_returns.append(returns_in_period)
             try:
