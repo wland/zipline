@@ -248,6 +248,9 @@ class AlgorithmSimulator(object):
         with self.processor.threadbound():
 
             for date, snapshot in stream:
+                #!! Personal update
+                self.algo.frame_count += 1
+
                 # We're still in the warmup period.  Use the event to
                 # update our universe, but don't yield any perf messages,
                 # and don't send a snapshot to handle_data.
@@ -288,9 +291,6 @@ class AlgorithmSimulator(object):
         """
         Update the universe with new event information.
         """
-        #!! Personal update
-        self.algo.frame_count += 1
-
         # Update our portfolio.
         self.algo.set_portfolio(event.portfolio)
         # the portfolio is modified by each event passed into the

@@ -345,6 +345,8 @@ class PerformanceTracker(object):
         log.info("last close: {d}".format(
             d=self.sim_params.last_close))
 
+        #import ipdb; ipdb.set_trace()
+        #NOTE self.total_days = not much when ran in live mode compare of backtest years periods
         self.risk_report = risk.RiskReport(self.returns, self.sim_params)
 
         risk_dict = self.risk_report.to_dict()

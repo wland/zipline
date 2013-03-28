@@ -95,6 +95,7 @@ class TransactionSimulator(object):
     def update(self, event):
         event.TRANSACTION = None
         # We only fill transactions on trade events.
+        #import ipdb; ipdb.set_trace()
         if event.type == zp.DATASOURCE_TYPE.TRADE:
             event.TRANSACTION = self.transact(event, self.open_orders)
         return event

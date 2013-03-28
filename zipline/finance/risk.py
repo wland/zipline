@@ -67,7 +67,7 @@ import numpy.linalg as la
 import zipline.finance.trading as trading
 from zipline.utils.date_utils import epoch_now
 
-from neuronquant.data.remote import Fetcher
+from neuronquant.tmpdata.remote import Remote
 import neuronquant.utils.datautils as datautils
 
 log = logbook.Logger('Risk')
@@ -116,16 +116,20 @@ class RiskMetricsBase(object):
         self.benchmark_period_returns, self.benchmark_returns = \
             self.calculate_period_returns(benchmark_returns)
 
-        if(len(self.benchmark_returns) != len(self.algorithm_returns)):
-            message = "Mismatch between benchmark_returns ({bm_count}) and \
-            algorithm_returns ({algo_count}) in range {start} : {end}"
-            message = message.format(
-                bm_count=len(self.benchmark_returns),
-                algo_count=len(self.algorithm_returns),
-                start=start_date,
-                end=end_date
-            )
-            raise Exception(message)
+        try:
+            if(len(self.benchmark_returns) != len(self.algorithm_returns)):
+                message = "Mismatch between benchmark_returns ({bm_count}) and \
+                algorithm_returns ({algo_count}) in range {start} : {end}"
+                message = message.format(
+                    bm_count=len(self.benchmark_returns),
+                    algo_count=len(self.algorithm_returns),
+                    start=start_date,
+                    end=end_date
+                )
+                raise Exception(message)
+        except:
+            #import ipdb; ipdb.set_trace()
+            print 'No report can be produced, probably because of live mode'
 
         self.trading_days = len(self.benchmark_returns)
         self.benchmark_volatility = self.calculate_volatility(
@@ -416,7 +420,10 @@ that date doesn't exceed treasury history range."
         tdd = trading.environment.trading_day_distance(dt, self.end_date)
         if tdd is None:
             return None
-        assert tdd >= 0
+        try:
+            assert tdd >= 0
+        except:
+            import ipdb; ipdb.set_trace()
         return tdd
 
     def get_treasury_rate(self, day):
@@ -474,18 +481,18 @@ class RiskMetricsIterative(RiskMetricsBase):
             if x.date >= self.start_date
         ]
         ## Here -----------------------------------------------------------------------------------------
-        self.fetcher = Fetcher()
+        self.remote = Remote()
 
     def download_benchmark(self, event):
-        code = str(event.returns)
-        assert code in datautils.Exchange
         ''' Get the current value of the index associated with code '''
-        perc_return = self.fetcher.get_stock_snapshot(datautils.Exchange[code]['google_symbol'],
-                                                         datautils.Exchange[code]['google_market'],
-                                                         light=False)
-        assert perc_return
+        code = str(event.returns)
+        #FIXME Fake return while data module isn't reshaped
+        #return 0.04
+        assert code in datautils.Exchange
+        bench_data = self.remote.fetch_equities_snapshot(datautils.Exchange[code]['index'])
+        assert bench_data
         #TODO Some check betwen received date and perc_return['trade_date_utc']
-        return float(perc_return[datautils.Exchange[code]['google_symbol']]['perc_change']) / 100.0
+        return float(bench_data[datautils.Exchange[code]['index']]['change_pct'])
 
     def update(self, market_close, returns_in_period):
         if trading.environment.is_trading_day(self.end_date):
