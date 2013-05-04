@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ from zipline.finance.trading import SimulationParameters
 
 class TestRecordAlgorithm(TestCase):
     def setUp(self):
-        self.sim_params = factory.create_simulation_parameters()
+        self.sim_params = factory.create_simulation_parameters(num_days=4)
         trade_history = factory.create_trade_history(
             133,
             [10.0, 10.0, 11.0, 11.0],
@@ -38,13 +38,17 @@ class TestRecordAlgorithm(TestCase):
             timedelta(days=1),
             self.sim_params
         )
+
         self.source = SpecificEquityTrades(event_list=trade_history)
         self.df_source, self.df = \
             factory.create_test_df_source(self.sim_params)
 
     def test_record_incr(self):
-        algo = RecordAlgorithm()
+        algo = RecordAlgorithm(
+            sim_params=self.sim_params,
+            data_frequency='daily')
         output = algo.run(self.source)
+
         np.testing.assert_array_equal(output['incr'].values,
                                       range(1, len(output) + 1))
 
@@ -52,7 +56,7 @@ class TestRecordAlgorithm(TestCase):
 class TestTransformAlgorithm(TestCase):
     def setUp(self):
         setup_logger(self)
-        self.sim_params = factory.create_simulation_parameters()
+        self.sim_params = factory.create_simulation_parameters(num_days=4)
         setup_logger(self)
 
         trade_history = factory.create_trade_history(
@@ -72,7 +76,7 @@ class TestTransformAlgorithm(TestCase):
 
     def test_source_as_input(self):
         algo = TestRegisterTransformAlgorithm(
-            self.sim_params,
+            sim_params=self.sim_params,
             sids=[133]
         )
         algo.run(self.source)
@@ -81,7 +85,6 @@ class TestTransformAlgorithm(TestCase):
 
     def test_multi_source_as_input_no_start_end(self):
         algo = TestRegisterTransformAlgorithm(
-            self.sim_params,
             sids=[133]
         )
 
@@ -102,20 +105,22 @@ class TestTransformAlgorithm(TestCase):
 
     def test_df_as_input(self):
         algo = TestRegisterTransformAlgorithm(
-            self.sim_params,
+            sim_params=self.sim_params,
             sids=[0, 1]
         )
         algo.run(self.df)
         assert isinstance(algo.sources[0], DataFrameSource)
 
     def test_panel_as_input(self):
-        algo = TestRegisterTransformAlgorithm(sids=[0, 1])
+        algo = TestRegisterTransformAlgorithm(
+            sim_params=self.sim_params,
+            sids=[0, 1])
         algo.run(self.panel)
         assert isinstance(algo.sources[0], DataPanelSource)
 
     def test_run_twice(self):
         algo = TestRegisterTransformAlgorithm(
-            self.sim_params,
+            sim_params=self.sim_params,
             sids=[0, 1]
         )
 
@@ -126,7 +131,7 @@ class TestTransformAlgorithm(TestCase):
 
     def test_transform_registered(self):
         algo = TestRegisterTransformAlgorithm(
-            self.sim_params,
+            sim_params=self.sim_params,
             sids=[133]
         )
 
@@ -139,21 +144,21 @@ class TestTransformAlgorithm(TestCase):
 
     def test_data_frequency_setting(self):
         algo = TestRegisterTransformAlgorithm(
-            self.sim_params,
+            sim_params=self.sim_params,
             data_frequency='daily'
         )
         self.assertEqual(algo.data_frequency, 'daily')
         self.assertEqual(algo.annualizer, 250)
 
         algo = TestRegisterTransformAlgorithm(
-            self.sim_params,
+            sim_params=self.sim_params,
             data_frequency='minute'
         )
         self.assertEqual(algo.data_frequency, 'minute')
         self.assertEqual(algo.annualizer, 250 * 6 * 60)
 
         algo = TestRegisterTransformAlgorithm(
-            self.sim_params,
+            sim_params=self.sim_params,
             data_frequency='minute',
             annualizer=10
         )

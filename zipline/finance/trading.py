@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,18 +19,13 @@ import logbook
 import datetime
 
 from functools import wraps
-from collections import defaultdict, OrderedDict
 from delorean import Delorean
+import pandas as pd
 from pandas import DatetimeIndex
 
+from collections import OrderedDict
 from zipline.data.loader import load_market_data
-import zipline.protocol as zp
-from zipline.finance.slippage import (
-    VolumeShareSlippage,
-    transact_partial
-)
 
-from zipline.finance.commission import PerShare
 
 log = logbook.Logger('Transaction Simulator')
 
@@ -74,33 +69,6 @@ log = logbook.Logger('Transaction Simulator')
 environment = None
 
 
-class TransactionSimulator(object):
-
-    def __init__(self):
-        self.transact = transact_partial(VolumeShareSlippage(), PerShare())
-        self.open_orders = defaultdict(list)
-
-    def place_order(self, order):
-        # initialized filled field.
-        order.filled = 0
-        self.open_orders[order.sid].append(order)
-
-    def transform(self, stream_in):
-        """
-        Main generator work loop.
-        """
-        for date, snapshot in stream_in:
-            yield date, [self.update(event) for event in snapshot]
-
-    def update(self, event):
-        event.TRANSACTION = None
-        # We only fill transactions on trade events.
-        #import ipdb; ipdb.set_trace()
-        if event.type == zp.DATASOURCE_TYPE.TRADE:
-            event.TRANSACTION = self.transact(event, self.open_orders)
-        return event
-
-
 class TradingEnvironment(object):
 
     def __init__(
@@ -115,8 +83,10 @@ class TradingEnvironment(object):
         if not load:
             load = load_market_data
 
-        self.benchmark_returns, self.treasury_curves = \
+        self.benchmark_returns, treasury_curves_map = \
             load(self.bm_symbol)
+
+        self.treasury_curves = pd.Series(treasury_curves_map)
 
         self._period_trading_days = None
         self._trading_days_series = None
@@ -151,6 +121,14 @@ class TradingEnvironment(object):
             day=test_date.day,
             tzinfo=pytz.utc
         )
+
+    def utc_dt_in_exchange(self, dt):
+        delorean = Delorean(dt, pytz.utc.zone)
+        return delorean.shift(self.exchange_tz).datetime
+
+    def exchange_dt_in_utc(self, dt):
+        delorean = Delorean(dt, self.exchange_tz)
+        return delorean.shift(pytz.utc.zone).datetime
 
     @property
     def period_trading_days(self):
@@ -202,7 +180,7 @@ class TradingEnvironment(object):
         if next_open is None:
             raise Exception(
                 "Attempt to backtest beyond available history. \
-Last successful date: %s" % self.market_open)
+Last successful date: %s" % self.last_trading_day)
 
         return self.get_open_and_close(next_open)
 
@@ -213,17 +191,19 @@ Last successful date: %s" % self.market_open)
         # shift the time between EST and UTC.
         next_open = next_open.replace(
             hour=9,
-            minute=30,
+            minute=31,
             second=0,
+            microsecond=0,
             tzinfo=None
         )
         # create a new Delorean with the next_open naive date and
         # the correct timezone for the exchange.
-        open_delorean = Delorean(next_open, self.exchange_tz)
-        open_utc = open_delorean.shift("UTC").datetime
+        open_utc = self.exchange_dt_in_utc(next_open)
 
         market_open = open_utc
-        market_close = market_open + self.get_trading_day_duration(open_utc)
+        market_close = (market_open
+                        + self.get_trading_day_duration(open_utc)
+                        - datetime.timedelta(minutes=1))
 
         return market_open, market_close
 
@@ -254,7 +234,8 @@ Last successful date: %s" % self.market_open)
 
 class SimulationParameters(object):
     def __init__(self, period_start, period_end,
-                 capital_base=10e3):
+                 capital_base=10e3,
+                 emission_rate='daily'):
 
         global environment
         if not environment:
@@ -264,6 +245,17 @@ class SimulationParameters(object):
         self.period_start = period_start
         self.period_end = period_end
         self.capital_base = capital_base
+
+        self.emission_rate = emission_rate
+
+        assert self.period_start <= self.period_end, \
+            "Period start falls after period end."
+
+        assert self.period_start <= environment.last_trading_day, \
+            "Period start falls after the last known trading day."
+        assert self.period_end >= environment.first_trading_day, \
+            "Period end falls before the first known trading day."
+
         self.first_open = self.calculate_first_open()
         self.last_close = self.calculate_last_close()
         start_index = \
@@ -274,14 +266,6 @@ class SimulationParameters(object):
         # trading_days.
         self.trading_days = \
             environment.trading_days[start_index:end_index + 1]
-
-        assert self.period_start <= self.period_end, \
-            "Period start falls after period end."
-
-        assert self.period_start <= environment.last_trading_day, \
-            "Period start falls after the last known trading day."
-        assert self.period_end >= environment.first_trading_day, \
-            "Period end falls before the first known trading day."
 
     def calculate_first_open(self):
         """

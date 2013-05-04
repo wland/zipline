@@ -32,8 +32,8 @@ The algorithm must expose methods:
     sids. List must have a length between 1 and 10. If None is returned the
     filter will block all events.
 
-  - handle_data: method that accepts a :py:class:`zipline.protocol_utils.ndict`
-    of the current state of the simulation universe. An example data ndict:
+  - handle_data: method that accepts a :py:class:`zipline.protocol.BarData`
+    of the current state of the simulation universe. An example data object:
 
         ..  This outputs the table as an HTML table but for some reason there
             is no bounding box. Make the previous paragraph ending colon a
@@ -145,12 +145,6 @@ class ExceptionAlgorithm(TradingAlgorithm):
 
         if self.throw_from == "initialize":
             raise Exception("Algo exception in initialize")
-        else:
-            pass
-
-    def set_order(self, order_callable):
-        if self.throw_from == "set_order":
-            raise Exception("Algo exception in set_order")
         else:
             pass
 
@@ -346,7 +340,7 @@ class BatchTransformAlgorithm(TradingAlgorithm):
         )
 
         self.return_not_full = return_data(
-            refresh_period=0,
+            refresh_period=1,
             window_length=self.window_length,
             compute_only_full=False
         )
@@ -384,9 +378,9 @@ class BatchTransformAlgorithm(TradingAlgorithm):
         self.price_multiple.handle_data(data, 1, extra_arg=1)
 
         if self.price_multiple.full:
-            pre = len(self.price_multiple.ticks)
+            pre = self.price_multiple.rolling_panel.get_current().shape[0]
             result1 = self.price_multiple.handle_data(data, 1, extra_arg=1)
-            post = len(self.price_multiple.ticks)
+            post = self.price_multiple.rolling_panel.get_current().shape[0]
             assert pre == post, "batch transform is appending redundant events"
             result2 = self.price_multiple.handle_data(data, 1, extra_arg=1)
             assert result1 is result2, "batch transform is not idempotent"
@@ -453,3 +447,32 @@ class SetPortfolioAlgorithm(TradingAlgorithm):
 
     def handle_data(self, data):
         self.portfolio = 3
+
+
+class TALIBAlgorithm(TradingAlgorithm):
+    """
+    An algorithm that applies a TA-Lib transform. The transform object can be
+    passed at initialization with the 'talib' keyword argument. The results are
+    stored in the talib_results array.
+    """
+    def initialize(self, *args, **kwargs):
+
+        if 'talib' not in kwargs:
+            raise KeyError('No TA-LIB transform specified '
+                           '(use keyword \'talib\').')
+        elif not isinstance(kwargs['talib'], (list, tuple)):
+            self.talib_transforms = (kwargs['talib'],)
+        else:
+            self.talib_transforms = kwargs['talib']
+
+        self.talib_results = dict((t, []) for t in self.talib_transforms)
+
+    def handle_data(self, data):
+        for t in self.talib_transforms:
+            result = t.handle_data(data)
+            if result is None:
+                if len(t.talib_fn.output_names) == 1:
+                    result = np.nan
+                else:
+                    result = (np.nan,) * len(t.talib_fn.output_names)
+            self.talib_results[t].append(result)

@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,8 +23,31 @@ from itertools import cycle, ifilter, izip
 from datetime import datetime, timedelta
 import numpy as np
 
-from zipline.gens.utils import hash_args, create_trade
+from zipline.protocol import (
+    Event,
+    DATASOURCE_TYPE
+)
+from zipline.gens.utils import hash_args
 from zipline.utils.tradingcalendar import trading_days
+
+
+def create_trade(sid, price, amount, datetime, source_id="test_factory"):
+
+    trade = Event()
+
+    trade.source_id = source_id
+    trade.type = DATASOURCE_TYPE.TRADE
+    trade.sid = sid
+    trade.dt = datetime
+    trade.price = price
+    trade.close = price
+    trade.open = price
+    trade.low = price * .95
+    trade.high = price * 1.05
+    trade.volume = amount
+    trade.TRANSACTION = None
+
+    return trade
 
 
 def date_gen(start=datetime(2006, 6, 6, 12, tzinfo=pytz.utc),
@@ -36,6 +59,11 @@ def date_gen(start=datetime(2006, 6, 6, 12, tzinfo=pytz.utc),
     """
     one_day = timedelta(days=1)
     cur = start
+    if delta == one_day:
+        # if we are producing daily timestamps, we
+        # use midnight
+        cur = cur.replace(hour=0, minute=0, second=0,
+                          microsecond=0)
 
     # yield count trade events, all on trading days, and
     # during trading hours.
@@ -49,11 +77,12 @@ def date_gen(start=datetime(2006, 6, 6, 12, tzinfo=pytz.utc),
             yield cur
 
         cur = cur + delta
-        cur_midnight = cur.replace(hour=0, minute=0, second=0)
+        cur_midnight = cur.replace(hour=0, minute=0, second=0, microsecond=0)
         # skip over any non-trading days
         while cur_midnight not in trading_days:
             cur = cur + one_day
-            cur_midnight = cur.replace(hour=0, minute=0, second=0)
+            cur_midnight = cur.replace(hour=0, minute=0, second=0,
+                                       microsecond=0)
             cur = cur.replace(day=cur_midnight.day)
 
 

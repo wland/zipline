@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,10 +16,9 @@
 from collections import defaultdict
 from math import sqrt
 
-import numpy as np
-
 from zipline.errors import WrongDataForTransform
 from zipline.transforms.utils import EventWindow, TransformMeta
+import zipline.utils.math_utils as zp_math
 
 
 class MovingStandardDev(object):
@@ -64,7 +63,7 @@ class MovingStandardDev(object):
 
     def update(self, event):
         """
-        Update the event window for this event's sid.  Return an ndict
+        Update the event window for this event's sid.  Return a dict
         from tracked fields to moving averages.
         """
         # This will create a new EventWindow if this is the first
@@ -118,7 +117,7 @@ class MovingStandardDevWindow(EventWindow):
             s_squared = (self.sum_sqr - self.sum * average) \
                 / (len(self) - 1)
 
-            if np.allclose(0, s_squared):
+            if zp_math.tolerant_equals(0, s_squared):
                 return 0.0
             stddev = sqrt(s_squared)
         return stddev

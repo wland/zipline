@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,19 +17,25 @@
 """
 Generator versions of transforms.
 """
+import functools
 import types
 import logbook
+
 import numpy
+
+from numbers import Integral
+
+import pandas as pd
+
+from zipline.utils.data import RollingPanel
+from zipline.protocol import Event
 
 from copy import deepcopy
 from datetime import datetime
 from collections import deque
 from abc import ABCMeta, abstractmethod
-from numbers import Integral
 
-import pandas as pd
-
-from zipline.protocol import Event, DATASOURCE_TYPE
+from zipline.protocol import DATASOURCE_TYPE
 from zipline.gens.utils import assert_sort_unframe_protocol, hash_args
 import zipline.finance.trading as trading
 
@@ -54,20 +60,19 @@ class InvalidWindowLength(Exception):
     pass
 
 
-class TransformMessage(object):
-    pass
-
-
-class Passthrough(object):
-    PASSTHROUGH = True
+def check_window_length(window_length):
     """
-    Trivial class for forwarding events.
+    Ensure the window length provided to a transform is valid.
     """
-    def __init__(self):
-        pass
-
-    def update(self, event):
-        pass
+    if window_length is None:
+        raise InvalidWindowLength("window_length must be provided")
+    if not isinstance(window_length, Integral):
+        raise InvalidWindowLength(
+            "window_length must be an integer-like number")
+    if window_length == 0:
+        raise InvalidWindowLength("window_length must be non-zero")
+    if window_length < 0:
+        raise InvalidWindowLength("window_length must be positive")
 
 
 class TransformMeta(type):
@@ -100,10 +105,6 @@ class StatefulTransform(object):
         assert hasattr(tnfm_class, 'update'), \
             "Stateful transform requires the class to have an update method"
 
-        # Flag set inside the Passthrough transform class to signify special
-        # behavior if we are being fed to merged_transforms.
-        self.passthrough = hasattr(tnfm_class, 'PASSTHROUGH')
-
         # Create an instance of our transform class.
         if isinstance(tnfm_class, TransformMeta):
             # Classes derived TransformMeta have their __call__
@@ -120,7 +121,8 @@ class StatefulTransform(object):
         # Normal object instantiation.
         else:
             self.state = tnfm_class(*args, **kwargs)
-
+        # save the window_length of the state for external access.
+        self.window_length = self.state.window_length
         # Create the string associated with this generator's output.
         self.namestring = tnfm_class.__name__ + hash_args(*args, **kwargs)
 
@@ -141,10 +143,7 @@ class StatefulTransform(object):
                     and message.type not in (
                         DATASOURCE_TYPE.TRADE,
                         DATASOURCE_TYPE.CUSTOM)):
-                # TODO: this should be yielding the original message
-                # instead of swallowing it. Will be an issue when we
-                # have a transaction source from brokers etc.
-                continue
+                yield message
             # allow upstream generators to yield None to avoid
             # blocking.
             if message is None:
@@ -184,6 +183,7 @@ class EventWindow(object):
 
     def __init__(self, market_aware=True, window_length=None, delta=None):
 
+        check_window_length(window_length)
         self.window_length = window_length
 
         self.ticks = deque()
@@ -197,16 +197,6 @@ class EventWindow(object):
             raise UnsupportedEventWindowFlagValue(
                 "delta values are no longer supported."
             )
-        if self.window_length is None:
-            raise InvalidWindowLength("window_length must be provided")
-        if not isinstance(self.window_length, Integral):
-            raise InvalidWindowLength(
-                "window_length must be an integer-like number")
-        if self.window_length == 0:
-            raise InvalidWindowLength("window_length must be non-zero")
-        if self.window_length < 0:
-            raise InvalidWindowLength("window_length must be positive")
-
         # Set the behavior for dropping events from the back of the
         # event window.
         self.drop_condition = self.out_of_market_window
@@ -279,7 +269,7 @@ class EventWindow(object):
                 (event, self.ticks[0])
 
 
-class BatchTransform(EventWindow):
+class BatchTransform(object):
     """Base class for batch transforms with a trailing window of
     variable length. As opposed to pure EventWindows that get a stream
     of events and are bound to a single SID, this class creates stream
@@ -352,9 +342,6 @@ class BatchTransform(EventWindow):
                 Only call the user-defined function once the window is
                 full. Returns None if window is not full yet.
         """
-
-        super(BatchTransform, self).__init__(True, window_length=window_length)
-
         if func is not None:
             self.compute_transform_value = func
         else:
@@ -367,16 +354,13 @@ class BatchTransform(EventWindow):
         # to operate on the data, but to also allow new symbols to
         # enter the batch transform's window IFF a sid filter is not
         # specified.
-        self.sids = None
-        if sids:
-            self.static_sids = True
-            self.sids = sids
+        if sids is not None:
             if isinstance(sids, (basestring, Integral)):
-                self.sids = set([sids])
+                self.static_sids = set([sids])
             else:
-                self.sids = set(sids)
+                self.static_sids = set(sids)
         else:
-            self.static_sids = False
+            self.static_sids = None
 
         self.initial_field_names = fields
         if isinstance(self.initial_field_names, basestring):
@@ -384,13 +368,16 @@ class BatchTransform(EventWindow):
         self.field_names = set()
 
         self.refresh_period = refresh_period
+
+        check_window_length(window_length)
         self.window_length = window_length
-        self.trading_days_since_update = 0
+
         self.trading_days_total = 0
         self.window = None
 
         self.full = False
-        self.last_dt = None
+        # Set to -inf essentially to cause update on first attempt.
+        self.last_dt = pd.Timestamp('1900-1-1', tz='UTC')
 
         self.updated = False
         self.cached = None
@@ -403,13 +390,13 @@ class BatchTransform(EventWindow):
         # set of stocks per quarter
         self.supplemental_data = None
 
+        self.rolling_panel = None
+
     def handle_data(self, data, *args, **kwargs):
         """
-        New method to handle a data frame as sent to the algorithm's
-        handle_data method.
+        Point of entry. Process an event frame.
         """
         # extract dates
-        #dts = [data[sid].datetime for sid in self.sids]
         dts = [event.datetime for event in data.itervalues()]
         # we have to provide the event with a dt. This is only for
         # checking if the event is outside the window or not so a
@@ -428,19 +415,121 @@ class BatchTransform(EventWindow):
         # only modify the trailing window if this is
         # a new event. This is intended to make handle_data
         # idempotent.
-        if event not in self.ticks:
-            # append data frame to window. update() will call handle_add() and
-            # handle_remove() appropriately, and self.updated
-            # will be modified based on the refresh_period
-            self.update(event)
+        if self.last_dt < event.dt:
+            self.updated = True
+            self._append_to_window(event)
         else:
-            # we are recalculating based on an old event, so
-            # there is no change in the contents of the trailing
-            # window
             self.updated = False
 
         # return newly computed or cached value
         return self.get_transform_value(*args, **kwargs)
+
+    def _append_to_window(self, event):
+        self.field_names = self._get_field_names(event)
+
+        if self.static_sids is None:
+            sids = set(event.data.keys())
+        else:
+            sids = self.static_sids
+
+        # Create rolling panel if not existant
+        if self.rolling_panel is None:
+            self.rolling_panel = RollingPanel(self.window_length,
+                                              self.field_names, sids)
+
+        # Store event in rolling frame
+        self.rolling_panel.add_frame(event.dt,
+                                     pd.DataFrame(event.data,
+                                                  index=self.field_names,
+                                                  columns=sids))
+
+        # update trading day counters
+        if self.last_dt.day != event.dt.day:
+            self.last_dt = event.dt
+            self.trading_days_total += 1
+
+        if self.trading_days_total >= self.window_length:
+            self.full = True
+
+    def get_transform_value(self, *args, **kwargs):
+        """Call user-defined batch-transform function passing all
+        arguments.
+
+        Note that this will only call the transform if the datapanel
+        has actually been updated. Otherwise, the previously, cached
+        value will be returned.
+        """
+        if self.compute_only_full and not self.full:
+            return None
+
+        #################################################
+        # Determine whether we should call the transform
+        # 0. Support historical/legacy usage of '0' signaling,
+        #    'update on every bar'
+        if self.refresh_period == 0:
+            period_signals_update = True
+        else:
+        # 1. Is the refresh period over?
+            period_signals_update = (
+                self.trading_days_total % self.refresh_period == 0)
+        # 2. Have the args or kwargs been changed since last time?
+        args_updated = args != self.last_args or kwargs != self.last_kwargs
+        recalculate_needed = args_updated or (period_signals_update and
+                                              self.updated)
+
+        if recalculate_needed:
+            self.cached = self.compute_transform_value(
+                self.get_data(),
+                *args,
+                **kwargs
+            )
+
+        self.last_args = args
+        self.last_kwargs = kwargs
+        return self.cached
+
+    def get_data(self):
+        """Create a pandas.Panel (i.e. 3d DataFrame) from the
+        events in the current window.
+
+        Returns:
+        The resulting panel looks like this:
+        index : field_name (e.g. price)
+        major axis/rows : dt
+        minor axis/colums : sid
+        """
+        data = self.rolling_panel.get_current()
+
+        if self.supplemental_data:
+            # item will be a date stamp
+            for item in data.items:
+                try:
+                    data[item] = self.supplemental_data[item].combine_first(
+                        data[item])
+                except KeyError:
+                    # Only filling in data available in supplemental data.
+                    pass
+
+        if self.clean_nans:
+            # Fills in gaps of missing data during transform
+            # of multiple stocks. E.g. we may be missing
+            # minute data because of illiquidity of one stock
+            data = data.fillna(method='ffill')
+
+        # Hold on to a reference to the data,
+        # so that it's easier to find the current data when stepping
+        # through with a debugger
+        self._curr_data = data
+
+        return data
+
+    def get_value(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Either overwrite get_value or provide a func argument.")
+
+    def __call__(self, f):
+        self.compute_transform_value = f
+        return self.handle_data
 
     def _extract_field_names(self, event):
         # extract field names from sids (price, volume etc), make sure
@@ -464,129 +553,12 @@ class BatchTransform(EventWindow):
                                'datetime', 'source_id'])
         return union - unwanted_fields
 
-    def handle_add(self, event):
-        if not self.last_dt:
-            self.last_dt = event.dt
-
-        if self.initial_field_names is None:
+    def _get_field_names(self, event):
+        if self.initial_field_names is not None:
+            return self.initial_field_names
+        else:
             self.latest_names = self._extract_field_names(event)
-            if self.field_names:
-                self.field_names = \
-                    set.union(self.field_names, self.latest_names)
-            else:
-                self.field_names = self.latest_names
-        else:
-            self.field_names = self.initial_field_names
-
-        if not self.static_sids:
-            if self.sids:
-                event_sids = set(event.data.keys())
-                self.sids = set.union(self.sids, event_sids)
-            else:
-                self.sids = set(event.data.keys())
-
-        # update trading day counters
-        if self.last_dt.day != event.dt.day:
-            self.last_dt = event.dt
-            self.trading_days_since_update += 1
-            self.trading_days_total += 1
-
-        if self.trading_days_total >= self.window_length:
-            self.full = True
-
-        if self.trading_days_since_update >= self.refresh_period:
-            # Setting updated to True will cause get_transform_value()
-            # to call the user-defined batch-transform with the most
-            # recent datapanel
-            self.updated = True
-        else:
-            self.updated = False
-
-    def get_data(self):
-        """Create a pandas.Panel (i.e. 3d DataFrame) from the
-        events in the current window.
-
-        Returns:
-        The resulting panel looks like this:
-        index : field_name (e.g. price)
-        major axis/rows : dt
-        minor axis/colums : sid
-        """
-        # This Panel data structure ultimately gets passed to the
-        # user-overloaded get_value() method.
-        data_dict = {tick['dt']: tick['data'] for tick in self.ticks}
-        data = pd.Panel(data_dict, major_axis=self.field_names,
-                        minor_axis=self.sids,
-                        dtype='float')
-
-        if self.supplemental_data:
-            # item will be a date stamp
-            for item in data.items:
-                try:
-                    data[item] = self.supplemental_data[item].combine_first(
-                        data[item])
-                except KeyError:
-                    # Only filling in data available in supplemental data.
-                    pass
-
-        data = data.swapaxes(0, 1)
-
-        if self.clean_nans:
-            # Fills in gaps of missing data during transform
-            # of multiple stocks. E.g. we may be missing
-            # minute data because of illiquidity of one stock
-            data = data.fillna(method='ffill')
-
-        # Hold on to a reference to the data,
-        # so that it's easier to find the current data when stepping
-        # through with a debugger
-        self.curr_data = data
-
-        return data
-
-    def handle_remove(self, event):
-        pass
-
-    def get_value(self, *args, **kwargs):
-        raise NotImplementedError(
-            "Either overwrite get_value or provide a func argument.")
-
-    def get_transform_value(self, *args, **kwargs):
-        """Call user-defined batch-transform function passing all
-        arguments.
-
-        Note that this will only call the transform if the datapanel
-        has actually been updated. Otherwise, the previously, cached
-        value will be returned.
-        """
-        if self.compute_only_full and not self.full:
-            return None
-
-        recalculate_needed = False
-        if self.updated:
-            # Create new pandas panel
-            self.window = self.get_data()
-            # reset our counter for refresh_period
-            self.trading_days_since_update = 0
-            recalculate_needed = True
-        else:
-            recalculate_needed = \
-                args != self.last_args or kwargs != self.last_kwargs
-
-        if recalculate_needed:
-            self.cached = self.compute_transform_value(
-                self.window,
-                *args,
-                **kwargs
-            )
-
-        self.last_args = args
-        self.last_kwargs = kwargs
-        return self.cached
-
-    def __call__(self, f):
-        self.compute_transform_value = f
-        return self.handle_data
+            return set.union(self.field_names, self.latest_names)
 
 
 def batch_transform(func):
@@ -594,6 +566,7 @@ def batch_transform(func):
     For an example on how to use this, see the doc string of BatchTransform.
     """
 
+    @functools.wraps(func)
     def create_window(*args, **kwargs):
         # passes the user defined function to BatchTransform which it
         # will call instead of self.get_value()

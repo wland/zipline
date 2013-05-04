@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,6 +16,9 @@
 """
 Tests for the zipline.finance package
 """
+import itertools
+import operator
+
 import pytz
 
 from unittest import TestCase
@@ -25,16 +28,19 @@ import numpy as np
 
 from nose.tools import timed
 
+import zipline.protocol
+from zipline.protocol import Event, DATASOURCE_TYPE
+
 import zipline.utils.factory as factory
 import zipline.utils.simfactory as simfactory
 
-from zipline.gens.tradesimulation import Order
+from zipline.finance.blotter import Blotter
+from zipline.gens.composites import date_sorted_sources
 
 import zipline.finance.trading as trading
 from zipline.finance.trading import SimulationParameters
 
 from zipline.finance.performance import PerformanceTracker
-from zipline.finance.trading import TransactionSimulator
 from zipline.utils.test_utils import(
     setup_logger,
     teardown_logger,
@@ -157,9 +163,15 @@ class FinanceTestCase(TestCase):
     def test_full_zipline(self):
         #provide enough trades to ensure all orders are filled.
         self.zipline_test_config['order_count'] = 100
-        self.zipline_test_config['trade_count'] = 200
-        zipline = simfactory.create_test_zipline(**self.zipline_test_config)
-        assert_single_position(self, zipline)
+        # making a small order amount, so that each order is filled
+        # in a single transaction, and txn_count == order_count.
+        self.zipline_test_config['order_amount'] = 25
+        # No transactions can be filled on the first trade, so
+        # we have one extra trade to ensure all orders are filled.
+        self.zipline_test_config['trade_count'] = 101
+        full_zipline = simfactory.create_test_zipline(
+            **self.zipline_test_config)
+        assert_single_position(self, full_zipline)
 
     # TODO: write tests for short sales
     # TODO: write a test to do massive buying or shorting.
@@ -202,7 +214,8 @@ class FinanceTestCase(TestCase):
     @timed(DEFAULT_TIMEOUT)
     def test_collapsing_orders(self):
         # create a scenario where order.amount <<< trade.volume
-        # to test that several orders can be covered properly by one trade.
+        # to test that several orders can be covered properly by one trade,
+        # but are represented by multiple transactions.
         params1 = {
             'trade_count': 6,
             'trade_amount': 100,
@@ -212,8 +225,8 @@ class FinanceTestCase(TestCase):
             'order_interval': timedelta(minutes=1),
             # because we placed an orders totaling less than 25% of one trade
             # the simulator should produce just one transaction.
-            'expected_txn_count': 1,
-            'expected_txn_volume': 24 * 1
+            'expected_txn_count': 24,
+            'expected_txn_volume': 24
         }
         self.transaction_sim(**params1)
 
@@ -225,8 +238,8 @@ class FinanceTestCase(TestCase):
             'order_count': 24,
             'order_amount': -1,
             'order_interval': timedelta(minutes=1),
-            'expected_txn_count': 1,
-            'expected_txn_volume': 24 * -1
+            'expected_txn_count': 24,
+            'expected_txn_volume': -24
         }
         self.transaction_sim(**params2)
 
@@ -239,8 +252,8 @@ class FinanceTestCase(TestCase):
             'order_count': 24,
             'order_amount': 1,
             'order_interval': timedelta(minutes=1),
-            'expected_txn_count': 1,
-            'expected_txn_volume': 24 * 1
+            'expected_txn_count': 24,
+            'expected_txn_volume': 24
         }
         self.transaction_sim(**params3)
 
@@ -268,7 +281,6 @@ class FinanceTestCase(TestCase):
 
         trade_count = params['trade_count']
         trade_interval = params['trade_interval']
-        trade_delay = params.get('trade_delay')
         order_count = params['order_count']
         order_amount = params['order_amount']
         order_interval = params['order_interval']
@@ -283,7 +295,7 @@ class FinanceTestCase(TestCase):
 
         sid = 1
         sim_params = factory.create_simulation_parameters()
-        trade_sim = TransactionSimulator()
+        blotter = Blotter()
         price = [10.1] * trade_count
         volume = [100] * trade_count
         start_date = sim_params.first_open
@@ -303,13 +315,9 @@ class FinanceTestCase(TestCase):
 
         order_date = start_date
         for i in xrange(order_count):
-            order = Order(**{
-                'sid': sid,
-                'amount': order_amount * alternator ** i,
-                'dt': order_date
-            })
 
-            trade_sim.place_order(order)
+            blotter.set_date(order_date)
+            blotter.order(sid, order_amount * alternator ** i, None, None)
 
             order_date = order_date + order_interval
             # move after market orders to just after market next
@@ -320,7 +328,7 @@ class FinanceTestCase(TestCase):
                         order_date = order_date.replace(hour=14, minute=30)
 
         # there should now be one open order list stored under the sid
-        oo = trade_sim.open_orders
+        oo = blotter.open_orders
         self.assertEqual(len(oo), 1)
         self.assertTrue(sid in oo)
         order_list = oo[sid]
@@ -333,16 +341,34 @@ class FinanceTestCase(TestCase):
 
         tracker = PerformanceTracker(sim_params)
 
+        benchmark_returns = [
+            Event({'dt': ret.date,
+                   'returns': ret.returns,
+                   'type':
+                   zipline.protocol.DATASOURCE_TYPE.BENCHMARK,
+                   'source_id': 'benchmarks'})
+            for ret in trading.environment.benchmark_returns
+            if ret.date.date() >= sim_params.period_start.date()
+            and ret.date.date() <= sim_params.period_end.date()
+        ]
+
+        generated_events = date_sorted_sources(generated_trades,
+                                               benchmark_returns)
+
         # this approximates the loop inside TradingSimulationClient
         transactions = []
-        for trade in generated_trades:
-            if trade_delay:
-                trade.dt = trade.dt + trade_delay
-            trade_sim.update(trade)
-            if trade.TRANSACTION:
-                transactions.append(trade.TRANSACTION)
+        for dt, events in itertools.groupby(generated_events,
+                                            operator.attrgetter('dt')):
+            for event in events:
+                if event.type == DATASOURCE_TYPE.TRADE:
 
-            tracker.process_event(trade)
+                    txns, _ = blotter.process_trade(event)
+
+                    for txn in txns:
+                        transactions.append(txn)
+                        tracker.process_event(txn)
+
+                tracker.process_event(event)
 
         if complete_fill:
             self.assertEqual(len(transactions), len(order_list))
@@ -362,7 +388,7 @@ class FinanceTestCase(TestCase):
         self.assertEqual(total_volume, cumulative_pos.amount)
 
         # the open orders should now be empty
-        oo = trade_sim.open_orders
+        oo = blotter.open_orders
         self.assertTrue(sid in oo)
         order_list = oo[sid]
         self.assertEqual(0, len(order_list))

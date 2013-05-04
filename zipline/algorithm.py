@@ -20,7 +20,7 @@ import numpy as np
 
 from datetime import datetime
 
-from itertools import groupby
+from itertools import groupby, ifilter
 from operator import attrgetter
 
 from zipline.errors import (
@@ -29,6 +29,7 @@ from zipline.errors import (
     UnsupportedCommissionModel,
     OverrideCommissionPostInit
 )
+from zipline.finance.performance import PerformanceTracker
 from zipline.sources import DataFrameSource, DataPanelSource
 
 from zipline.utils.factory import create_simulation_parameters
@@ -39,14 +40,18 @@ from zipline.finance.slippage import (
     transact_partial
 )
 from zipline.finance.commission import PerShare, PerTrade
+from zipline.finance.blotter import Blotter
 from zipline.finance.constants import ANNUALIZER
+import zipline.finance.trading as trading
+import zipline.protocol
+from zipline.protocol import Event
 
 from zipline.gens.composites import (
     date_sorted_sources,
     sequential_transforms,
     alias_dt
 )
-from zipline.gens.tradesimulation import TradeSimulationClient as tsc
+from zipline.gens.tradesimulation import AlgorithmSimulator
 
 DEFAULT_CAPITAL_BASE = float("1.0e5")
 
@@ -83,8 +88,7 @@ class TradingAlgorithm(object):
             capital_base : float <default: 1.0e5>
                How much capital to start with.
         """
-        self.frame_count = 0
-        self.order = None
+        #self.frame_count = 0
         self._portfolio = None
         self.datetime = None
 
@@ -114,6 +118,8 @@ class TradingAlgorithm(object):
 
         self.sim_params = kwargs.pop('sim_params', None)
 
+        self.blotter = kwargs.pop('blotter', Blotter())
+
         # an algorithm subclass needs to set initialized to True when
         # it is fully initialized.
         self.initialized = False
@@ -121,25 +127,60 @@ class TradingAlgorithm(object):
         # call to user-defined constructor method
         self.initialize(*args, **kwargs)
 
-    def _create_generator(self, sim_params):
+    def _create_data_generator(self, source_filter, sim_params):
+        """
+        Create a merged data generator using the sources and
+        transforms attached to this algorithm.
+
+        ::source_filter:: is a method that receives events in date
+        sorted order, and returns True for those events that should be
+        processed by the zipline, and False for those that should be
+        skipped.
+        """
+        benchmark_return_source = [
+            Event({'dt': ret.date,
+                   'returns': ret.returns,
+                   'type': zipline.protocol.DATASOURCE_TYPE.BENCHMARK,
+                   'source_id': 'benchmarks'})
+            for ret in trading.environment.benchmark_returns
+            if ret.date.date() >= sim_params.period_start.date()
+            and ret.date.date() <= sim_params.period_end.date()
+        ]
+
+        date_sorted = date_sorted_sources(*self.sources)
+
+        if source_filter:
+            date_sorted = ifilter(source_filter, date_sorted)
+
+        with_tnfms = sequential_transforms(date_sorted,
+                                           *self.transforms)
+        with_alias_dt = alias_dt(with_tnfms)
+
+        with_benchmarks = date_sorted_sources(benchmark_return_source,
+                                              with_alias_dt)
+
+        # Group together events with the same dt field. This depends on the
+        # events already being sorted.
+        return groupby(with_benchmarks, attrgetter('dt'))
+
+    def _create_generator(self, sim_params, source_filter=None):
         """
         Create a basic generator setup using the sources and
         transforms attached to this algorithm.
-        """
 
-        self.date_sorted = date_sorted_sources(*self.sources)
-        self.with_tnfms = sequential_transforms(self.date_sorted,
-                                                *self.transforms)
-        self.with_alias_dt = alias_dt(self.with_tnfms)
-        # Group together events with the same dt field. This depends on the
-        # events already being sorted.
-        self.grouped_by_dt = groupby(self.with_alias_dt, attrgetter('dt'))
-        self.trading_client = tsc(self, sim_params)
+        ::source_filter:: is a method that receives events in date
+        sorted order, and returns True for those events that should be
+        processed by the zipline, and False for those that should be
+        skipped.
+        """
+        self.data_gen = self._create_data_generator(source_filter, sim_params)
+        self.perf_tracker = PerformanceTracker(sim_params)
+        self.trading_client = AlgorithmSimulator(self, sim_params)
 
         transact_method = transact_partial(self.slippage, self.commission)
         self.set_transact(transact_method)
 
-        return self.trading_client.simulate(self.grouped_by_dt)
+        return self.trading_client.transform(self.data_gen)
 
     def get_generator(self):
         """
@@ -292,6 +333,9 @@ class TradingAlgorithm(object):
         for name, value in kwargs.items():
             self._recorded_vars[name] = value
 
+    def order(self, sid, amount, limit_price=None, stop_price=None):
+        return self.blotter.order(sid, amount, limit_price, stop_price)
+
     @property
     def recorded_vars(self):
         return copy(self._recorded_vars)
@@ -302,9 +346,6 @@ class TradingAlgorithm(object):
 
     def set_portfolio(self, portfolio):
         self._portfolio = portfolio
-
-    def set_order(self, order_callable):
-        self.order = order_callable
 
     def set_logger(self, logger):
         self.logger = logger
@@ -330,7 +371,7 @@ class TradingAlgorithm(object):
         Set the method that will be called to create a
         transaction from open orders and trade events.
         """
-        self.trading_client.ordering_client.transact = transact
+        self.blotter.transact = transact
 
     def set_slippage(self, slippage):
         if not isinstance(slippage, (VolumeShareSlippage, FixedSlippage)):

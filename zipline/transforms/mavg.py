@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -67,7 +67,7 @@ class MovingAverage(object):
 
     def update(self, event):
         """
-        Update the event window for this event's sid.  Return an ndict
+        Update the event window for this event's sid.  Return a dict
         from tracked fields to moving averages.
         """
         # This will create a new EventWindow if this is the first
@@ -141,7 +141,7 @@ class MovingAverageEventWindow(EventWindow):
 
     def get_averages(self):
         """
-        Return an ndict of all our tracked averages.
+        Return a dict of all our tracked averages.
         """
         out = Averages()
         for field in self.fields:

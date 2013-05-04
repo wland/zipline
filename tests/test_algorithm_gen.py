@@ -1,6 +1,6 @@
 #!/usr/bin/python
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -66,10 +66,12 @@ class TestAlgo(TradingAlgorithm):
 
             self.ordered = True
 
-        self.asserter.assertGreaterEqual(
-            self.latest_date,
-            self.slippage.latest_date
-        )
+        else:
+
+            self.asserter.assertGreaterEqual(
+                self.latest_date,
+                self.slippage.latest_date
+            )
 
 
 class AlgorithmGeneratorTestCase(TestCase):
@@ -106,7 +108,7 @@ class AlgorithmGeneratorTestCase(TestCase):
             # May 7, 2012 was an LSE holiday, confirm the 4th trading
             # day was May 8.
             self.assertEqual(results[4]['daily_perf']['period_open'],
-                             datetime(2012, 5, 8, 8, 30, tzinfo=pytz.utc))
+                             datetime(2012, 5, 8, 8, 31, tzinfo=pytz.utc))
 
     @timed(DEFAULT_TIMEOUT)
     def test_generator_dates(self):

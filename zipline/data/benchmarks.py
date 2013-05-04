@@ -12,13 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import collections
 
 from datetime import datetime
 
 import csv
 
-from StringIO import StringIO
 from functools import partial
 
 import requests
@@ -29,6 +28,10 @@ from loader_utils import (
     Mapping
 )
 from zipline.protocol import DailyReturn
+
+
+class BenchmarkDataNotFoundError(Exception):
+    pass
 
 _BENCHMARK_MAPPING = {
     # Need to add 'symbol'
@@ -52,28 +55,36 @@ def get_raw_benchmark_data(start_date, end_date, symbol):
 
     # create benchmark files
     # ^GSPC 19500103
-    params = {
-        's': symbol,
-        # end_date month, zero indexed
-        'd': end_date.month - 1,
-        # end_date day str(int(todate[6:8])) #day
-        'e': end_date.day,
-        # end_date year str(int(todate[0:4]))
-        'f': end_date.year,
-        # daily frequency
-        'g': 'd',
+    params = collections.OrderedDict((
+        ('s', symbol),
         # start_date month, zero indexed
-        'a': start_date.month - 1,
+        ('a', start_date.month - 1),
         # start_date day
-        'b': start_date.day,
+        ('b', start_date.day),
         # start_date year
-        'c': start_date.year
-    }
+        ('c', start_date.year),
+        # end_date month, zero indexed
+        ('d', end_date.month - 1),
+        # end_date day str(int(todate[6:8])) #day
+        ('e', end_date.day),
+        # end_date year str(int(todate[0:4]))
+        ('f', end_date.year),
+        # daily frequency
+        ('g', 'd'),
+    ))
 
     res = requests.get('http://ichart.yahoo.com/table.csv',
-                       params=params)
+                       params=params, stream=True)
 
-    return csv.DictReader(StringIO(res.content))
+    if not res.ok:
+        raise BenchmarkDataNotFoundError("""
+No benchmark data found for date range.
+start_date={start_date}, end_date={end_date}, url={url}""".strip().
+                                         format(start_date=start_date,
+                                                end_date=end_date,
+                                                url=res.url))
+
+    return csv.DictReader(res.iter_lines())
 
 
 def get_benchmark_data(symbol, start_date=None, end_date=None):
@@ -86,12 +97,10 @@ def get_benchmark_data(symbol, start_date=None, end_date=None):
         end_date = datetime.utcnow()
 
     raw_benchmark_data = get_raw_benchmark_data(start_date, end_date, symbol)
-    # Reverse data so we can load it in reverse chron order.
-    benchmarks_source = reversed(list(raw_benchmark_data))
 
     mappings = benchmark_mappings()
 
-    return source_to_records(mappings, benchmarks_source)
+    return source_to_records(mappings, raw_benchmark_data)
 
 
 def get_benchmark_returns(symbol, start_date=None, end_date=None):
@@ -108,4 +117,6 @@ def get_benchmark_returns(symbol, start_date=None, end_date=None):
         daily_return = DailyReturn(date=data_point['date'], returns=returns)
         benchmark_returns.append(daily_return)
 
+    # Reverse data so we can load it in reverse chron order.
+    benchmark_returns.reverse()
     return benchmark_returns

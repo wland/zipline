@@ -48,7 +48,10 @@ Installation
 Since zipline is pure-python code it should be very easy to install
 and set up with pip:
 
-```pip install zipline```
+```
+pip install numpy   # Pre-install numpy to handle dependency chain quirk
+pip install zipline
+```
 
 If there are problems installing the dependencies or zipline we
 recommend installing these packages via some other means. For Windows,
@@ -140,6 +143,20 @@ Thank you for all the help so far!
 
 (alert us if we've inadvertantly missed listing you here!)
 
+Development Environment
+-----------------------
+
+The following guide assumes your system has [virtualenvwrapper](https://bitbucket.org/dhellmann/virtualenvwrapper)
+and [pip](http://www.pip-installer.org/en/latest/) already installed.
+
+Suggested installation of Python library dependencies used for development:
+
+```
+mkvirtualenv zipline
+./etc/ordered_pip.sh ./etc/requirements.txt
+pip install -r ./etc/requirements_dev.txt
+```
+
 Style Guide
 ------------
 
@@ -153,8 +170,7 @@ The maintainers check the code using the flake8 script,
 requirements_dev.txt.
 
 Before submitting patches or pull requests, please ensure that your
-changes pass ```flake8 zipline tests```
-
+changes pass ```flake8 zipline tests``` and ```nosetests```
 
 Source
 ======

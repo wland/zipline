@@ -1,8 +1,9 @@
 from datetime import datetime
 import blist
 from zipline.utils.date_utils import EPOCH
-from itertools import izip
+from itertools import izip_longest
 from logbook import FileHandler
+from zipline.finance.blotter import ORDER_STATUS
 
 
 def setup_logger(test, path='test.log'):
@@ -18,17 +19,15 @@ def teardown_logger(test):
 def check_list(test, a, b, label):
     test.assertTrue(isinstance(a, (list, blist.blist)))
     test.assertTrue(isinstance(b, (list, blist.blist)))
-    for i, (a_val, b_val) in enumerate(izip(a, b)):
+    for i, (a_val, b_val) in enumerate(izip_longest(a, b)):
         check(test, a_val, b_val, label + "[" + str(i) + "]")
 
 
 def check_dict(test, a, b, label):
     test.assertTrue(isinstance(a, dict))
     test.assertTrue(isinstance(b, dict))
-    for key in a.keys():
-
-        test.assertTrue(key in a, "missing key at: " + label + "." + key)
-        test.assertTrue(key in b, "missing key at: " + label + "." + key)
+    test.assertEqual(sorted(a), sorted(b), "different keys at: " + label)
+    for key in a:
         a_val = a[key]
         b_val = b[key]
         check(test, a_val, b_val, label + "." + key)
@@ -92,6 +91,22 @@ def assert_single_position(test, zipline):
     # dicts.
     closing_positions = output[-2]['daily_perf']['positions']
 
+    # confirm that all orders were filled.
+    # iterate over the output updates, overwriting
+    # orders when they are updated. Then check the status on all.
+    orders_by_id = {}
+    for update in output:
+        if 'daily_perf' in update:
+            if 'orders' in update['daily_perf']:
+                for order in update['daily_perf']['orders']:
+                    orders_by_id[order['id']] = order
+
+    for order in orders_by_id.itervalues():
+        test.assertEqual(
+            order['status'],
+            ORDER_STATUS.FILLED,
+            "")
+
     test.assertEqual(
         len(closing_positions),
         1,
@@ -126,6 +141,7 @@ class ExceptionSource(object):
 class ExceptionTransform(object):
 
     def __init__(self):
+        self.window_length = 1
         pass
 
     def get_hash(self):

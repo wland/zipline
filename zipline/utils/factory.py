@@ -15,7 +15,7 @@
 
 
 """
-Factory functions to prepare useful data for tests.
+Factory functions to prepare useful data.
 """
 import pytz
 import random
@@ -31,21 +31,29 @@ from zipline.protocol import DailyReturn, Event, DATASOURCE_TYPE
 from zipline.sources import (SpecificEquityTrades,
                              DataFrameSource,
                              DataPanelSource)
-from zipline.gens.utils import create_trade
 from zipline.finance.trading import SimulationParameters
 import zipline.finance.trading as trading
-from zipline.sources.test_source import date_gen
+from zipline.sources.test_source import (
+    date_gen,
+    create_trade
+)
 
 
 def create_simulation_parameters(year=2006, start=None, end=None,
-                                 capital_base=float("1.0e5")
+                                 capital_base=float("1.0e5"),
+                                 num_days=None
                                  ):
     """Construct a complete environment with reasonable defaults"""
     if start is None:
         start = datetime(year, 1, 1, tzinfo=pytz.utc)
     if end is None:
-        end = datetime(year, 12, 31, tzinfo=pytz.utc)
-
+        if num_days:
+            trading.environment = trading.TradingEnvironment()
+            start_index = trading.environment.trading_days.searchsorted(
+                start)
+            end = trading.environment.trading_days[start_index + num_days - 1]
+        else:
+            end = datetime(year, 12, 31, tzinfo=pytz.utc)
     sim_params = SimulationParameters(
         period_start=start,
         period_end=end,
@@ -93,7 +101,7 @@ def create_random_simulation_parameters():
 
         random_index = random.randint(
             0,
-            len(treasury_curves)
+            len(treasury_curves) - 1
         )
 
         start_dt = treasury_curves.keys()[random_index]
@@ -118,14 +126,14 @@ check treasury and benchmark data in findb, and re-run the test."""
 
 def get_next_trading_dt(current, interval):
     naive = current.replace(tzinfo=None)
-    delo = Delorean(naive, "UTC")
+    delo = Delorean(naive, pytz.utc.zone)
     ex_tz = trading.environment.exchange_tz
     next_dt = delo.shift(ex_tz).datetime
 
     while True:
         next_dt = next_dt + interval
         next_delo = Delorean(next_dt.replace(tzinfo=None), ex_tz)
-        next_utc = next_delo.shift("UTC").datetime
+        next_utc = next_delo.shift(pytz.utc.zone).datetime
         if trading.environment.is_market_hours(next_utc):
             break
 
@@ -137,8 +145,14 @@ def create_trade_history(sid, prices, amounts, interval, sim_params,
     trades = []
     current = sim_params.first_open
 
+    oneday = timedelta(days=1)
+    use_midnight = interval >= oneday
     for price, amount in zip(prices, amounts):
-        trade = create_trade(sid, price, amount, current, source_id)
+        if use_midnight:
+            trade_dt = current.replace(hour=0, minute=0)
+        else:
+            trade_dt = current
+        trade = create_trade(sid, price, amount, trade_dt, source_id)
         trades.append(trade)
         current = get_next_trading_dt(current, interval)
 
@@ -151,9 +165,10 @@ def create_dividend(sid, payment, declared_date, ex_date, pay_date):
         'sid': sid,
         'gross_amount': payment,
         'net_amount': payment,
-        'dt': declared_date.replace(hour=0, minute=0, second=0),
-        'ex_date': ex_date.replace(hour=0, minute=0, second=0),
-        'pay_date': pay_date.replace(hour=0, minute=0, second=0),
+        'dt': declared_date.replace(hour=0, minute=0, second=0, microsecond=0),
+        'ex_date': ex_date.replace(hour=0, minute=0, second=0, microsecond=0),
+        'pay_date': pay_date.replace(hour=0, minute=0, second=0,
+                                     microsecond=0),
         'type': DATASOURCE_TYPE.DIVIDEND
     })
 
@@ -166,6 +181,7 @@ def create_txn(sid, price, amount, datetime):
         'amount': amount,
         'dt': datetime,
         'price': price,
+        'type': DATASOURCE_TYPE.TRANSACTION
     })
     return txn
 
@@ -182,50 +198,30 @@ def create_txn_history(sid, priceList, amtList, interval, sim_params):
     return txns
 
 
-def create_returns(daycount, sim_params):
-    """
-    For the given number of calendar (not trading) days return all the trading
-    days between start and start + daycount.
-    """
-    test_range = []
-    current = sim_params.first_open
-    one_day = timedelta(days=1)
-
-    for day in range(daycount):
-        current = current + one_day
-        if trading.environment.is_trading_day(current):
-            r = DailyReturn(current, random.random())
-            test_range.append(r)
-
-    return test_range
-
-
 def create_returns_from_range(sim_params):
     current = sim_params.first_open
     end = sim_params.last_close
-    one_day = timedelta(days=1)
     test_range = []
     while current <= end:
         r = DailyReturn(current, random.random())
         test_range.append(r)
-        current = get_next_trading_dt(current, one_day)
+        current = trading.environment.next_trading_day(current)
 
     return test_range
 
 
 def create_returns_from_list(returns, sim_params):
     current = sim_params.first_open
-    one_day = timedelta(days=1)
     test_range = []
 
     #sometimes the range starts with a non-trading day.
     if not trading.environment.is_trading_day(current):
-        current = get_next_trading_dt(current, one_day)
+        current = trading.environment.next_trading_day(current)
 
     for return_val in returns:
         r = DailyReturn(current, return_val)
         test_range.append(r)
-        current = get_next_trading_dt(current, one_day)
+        current = trading.environment.next_trading_day(current)
 
     return test_range
 
@@ -333,6 +329,33 @@ def create_test_panel_source(sim_params=None):
     return DataPanelSource(panel), panel
 
 
+def create_test_panel_ohlc_source(sim_params=None):
+    start = sim_params.first_open \
+        if sim_params else pd.datetime(1990, 1, 3, 0, 0, 0, 0, pytz.utc)
+
+    end = sim_params.last_close \
+        if sim_params else pd.datetime(1990, 1, 8, 0, 0, 0, 0, pytz.utc)
+
+    index = pd.DatetimeIndex(start=start, end=end, freq=pd.datetools.day)
+    price = np.arange(0, len(index)) + 100
+    high = price * 1.05
+    low = price * 0.95
+    open_ = price + .1 * (price % 2 - .5)
+    volume = np.ones(len(index)) * 1000
+    arbitrary = np.ones(len(index))
+
+    df = pd.DataFrame({'price': price,
+                       'high': high,
+                       'low': low,
+                       'open': open_,
+                       'volume': volume,
+                       'arbitrary': arbitrary},
+                      index=index)
+    panel = pd.Panel.from_dict({0: df})
+
+    return DataPanelSource(panel), panel
+
+
 def _load_raw_yahoo_data(indexes=None, stocks=None, start=None, end=None):
     """Load closing prices from yahoo finance.
 
@@ -352,28 +375,29 @@ def _load_raw_yahoo_data(indexes=None, stocks=None, start=None, end=None):
         http://wesmckinney.com/files/20111017/notebook_output.pdf
     """
 
-    if indexes is None:
-        indexes = {'SPX': '^GSPC'}
-    if stocks is None:
-        stocks = ['AAPL', 'GE', 'IBM', 'MSFT', 'XOM', 'AA', 'JNJ', 'PEP', 'KO']
-    if start is None:
-        start = pd.datetime(1993, 1, 1, 0, 0, 0, 0, pytz.utc)
-    if end is None:
-        end = pd.datetime(2002, 1, 1, 0, 0, 0, 0, pytz.utc)
+    assert indexes is not None or stocks is not None, """
+must specify stocks or indexes"""
 
-    assert start < end, "start date is later than end date."
+    if start is None:
+        start = pd.datetime(1990, 1, 1, 0, 0, 0, 0, pytz.utc)
+
+    if not start is None and not end is None:
+        assert start < end, "start date is later than end date."
 
     data = OrderedDict()
 
-    for stock in stocks:
-        print stock
-        stkd = DataReader(stock, 'yahoo', start, end).sort_index()
-        data[stock] = stkd
+    if stocks is not None:
+        for stock in stocks:
+            print stock
+            stkd = DataReader(stock, 'yahoo', start, end).sort_index()
+            data[stock] = stkd
 
-    for name, ticker in indexes.iteritems():
-        print name
-        stkd = DataReader(ticker, 'yahoo', start, end).sort_index()
-        data[name] = stkd
+    if indexes is not None:
+        for name, ticker in indexes.iteritems():
+            print name
+            stkd = DataReader(ticker, 'yahoo', start, end).sort_index()
+            data[name] = stkd
+
     return data
 
 

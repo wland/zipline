@@ -134,6 +134,8 @@ import logbook
 import math
 
 import numpy as np
+import pandas as pd
+from collections import OrderedDict, defaultdict
 
 import zipline.protocol as zp
 import zipline.finance.risk as risk
@@ -157,16 +159,20 @@ class PerformanceTracker(object):
         first_day = self.sim_params.first_open
         self.market_open, self.market_close = \
             trading.environment.get_open_and_close(first_day)
-        self.progress = 0.0
         self.total_days = self.sim_params.days_in_period
-        # one indexed so that we reach 100%
-        self.day_count = 0.0
         self.capital_base = self.sim_params.capital_base
-        self.returns = []
-        self.txn_count = 0
-        self.event_count = 0
+        self.emission_rate = sim_params.emission_rate
         self.cumulative_risk_metrics = \
-            risk.RiskMetricsIterative(self.period_start)
+            risk.RiskMetricsIterative(self.sim_params)
+        self.emission_rate = sim_params.emission_rate
+
+        if self.emission_rate == 'daily':
+            self.all_benchmark_returns = pd.Series(
+                index=trading.environment.trading_days)
+        elif self.emission_rate == 'minute':
+            self.all_benchmark_returns = pd.Series(index=pd.date_range(
+                self.sim_params.first_open, self.sim_params.last_close,
+                freq='Min'))
 
         # this performance period will span the entire simulation.
         self.cumulative_performance = PerformancePeriod(
@@ -178,6 +184,7 @@ class PerformanceTracker(object):
             # don't save the transactions for the cumulative
             # period
             keep_transactions=False,
+            keep_orders=False,
             # don't serialize positions for cumualtive period
             serialize_positions=False
         )
@@ -190,91 +197,116 @@ class PerformanceTracker(object):
             self.market_open,
             self.market_close,
             keep_transactions=True,
+            keep_orders=True,
             serialize_positions=True
         )
+
+        self.saved_dt = self.period_start
+        self.returns = []
+        # one indexed so that we reach 100%
+        self.day_count = 0.0
+        self.txn_count = 0
+        self.event_count = 0
 
     def __repr__(self):
         return "%s(%r)" % (
             self.__class__.__name__,
             {'simulation parameters': self.sim_params})
 
-    def transform(self, stream_in):
-        """
-        Main generator work loop.
-        """
-        for date, snapshot in stream_in:
-            new_snapshot = []
+    @property
+    def progress(self):
+        if self.emission_rate == 'minute':
+            # Fake a value
+            return 1.0
+        elif self.emission_rate == 'daily':
+            return self.day_count / self.total_days
 
-            for event in snapshot:
-                messages = self.process_event(event)
-                if messages is not None:
-                    event.perf_messages = messages
-                    event.portfolio = self.get_portfolio()
-
-                    new_snapshot.append(event)
-
-            if new_snapshot:
-                yield date, new_snapshot
+    def set_date(self, date):
+        if self.emission_rate == 'minute':
+            self.saved_dt = date
+            self.todays_performance.period_close = self.saved_dt
 
     def get_portfolio(self):
         return self.cumulative_performance.as_portfolio()
 
-    def to_dict(self):
+    def to_dict(self, emission_type=None):
         """
         Creates a dictionary representing the state of this tracker.
         Returns a dict object of the form described in header comments.
         """
-        return {
+        if not emission_type:
+            emission_type = self.emission_rate
+        _dict = {
             'period_start': self.period_start,
             'period_end': self.period_end,
-            'progress': self.progress,
             'capital_base': self.capital_base,
             'cumulative_perf': self.cumulative_performance.to_dict(),
-            'daily_perf': self.todays_performance.to_dict(),
-            'cumulative_risk_metrics': self.cumulative_risk_metrics.to_dict()
+            'progress': self.progress
         }
+        if emission_type == 'daily':
+            _dict.update({'cumulative_risk_metrics':
+                          self.cumulative_risk_metrics.to_dict(),
+                          'daily_perf':
+                          self.todays_performance.to_dict()})
+        if emission_type == 'minute':
+            # Currently reusing 'todays_performance' for intraday trading
+            # result, should be analogous, but has the potential for needing
+            # its own configuration down the line.
+            # Naming as intraday to make clear that these results are
+            # being updated per minute
+            _dict['intraday_risk_metrics'] = \
+                self.cumulative_risk_metrics.to_dict()
+            _dict['intraday_perf'] = self.todays_performance.to_dict(
+                self.saved_dt)
+
+        return _dict
 
     def process_event(self, event):
 
-        messages = None
         self.event_count += 1
 
         if event.type == zp.DATASOURCE_TYPE.TRADE:
-            messages = []
-            while event.dt > self.market_close and event.dt < self.last_close:
-                messages.append(self.handle_market_close())
-
-            if event.TRANSACTION:
-                self.txn_count += 1
-                self.cumulative_performance.execute_transaction(
-                    event.TRANSACTION
-                )
-                self.todays_performance.execute_transaction(event.TRANSACTION)
-
             #update last sale
             self.cumulative_performance.update_last_sale(event)
             self.todays_performance.update_last_sale(event)
-            del event['TRANSACTION']
+
+        elif event.type == zp.DATASOURCE_TYPE.TRANSACTION:
+            # Trade simulation always follows a transaction with the
+            # TRADE event that was used to simulate it, so we don't
+            # check for end of day rollover messages here.
+            self.txn_count += 1
+            self.cumulative_performance.execute_transaction(
+                event
+            )
+            self.todays_performance.execute_transaction(event)
 
         elif event.type == zp.DATASOURCE_TYPE.DIVIDEND:
             self.cumulative_performance.add_dividend(event)
             self.todays_performance.add_dividend(event)
-            # this event will not be relayed up
-            messages = None
+
+        elif event.type == zp.DATASOURCE_TYPE.ORDER:
+            self.cumulative_performance.record_order(event)
+            self.todays_performance.record_order(event)
+
         elif event.type == zp.DATASOURCE_TYPE.CUSTOM:
-            # we just want to relay this event unchanged.
-            messages = []
-            return messages
+            pass
+        elif event.type == zp.DATASOURCE_TYPE.BENCHMARK:
+            self.all_benchmark_returns[event.dt] = event.returns
 
         #calculate performance as of last trade
         self.cumulative_performance.calculate_performance()
         self.todays_performance.calculate_performance()
 
-        return messages
+    def handle_minute_close(self, dt):
+        #update risk metrics for cumulative performance
+        self.cumulative_risk_metrics.update(dt,
+                                            self.todays_performance.returns,
+                                            self.all_benchmark_returns[dt])
 
     def handle_market_close(self):
         # add the return results from today to the list of DailyReturn objects.
-        todays_date = self.market_close.replace(hour=0, minute=0, second=0)
+        todays_date = self.market_close.replace(hour=0, minute=0, second=0,
+                                                microsecond=0)
         self.cumulative_performance.update_dividends(todays_date)
         self.todays_performance.update_dividends(todays_date)
 
@@ -286,13 +318,12 @@ class PerformanceTracker(object):
 
         #update risk metrics for cumulative performance
         self.cumulative_risk_metrics.update(
-            self.market_close,
-            self.todays_performance.returns)
+            todays_return_obj.date,
+            todays_return_obj.returns,
+            self.all_benchmark_returns[todays_return_obj.date])
 
         # increment the day counter before we move markers forward.
         self.day_count += 1.0
-        # calculate progress of test
-        self.progress = self.day_count / self.total_days
 
         # Take a snapshot of our current peformance to return to the
         # browser.
@@ -318,7 +349,8 @@ class PerformanceTracker(object):
         # hour between the close of markets and the next open. To
         # make sure midnight_between matches identically with
         # dividend data dates, it is in UTC.
-        midnight_between = self.market_open.replace(hour=0, minute=0, second=0)
+        midnight_between = self.market_open.replace(hour=0, minute=0, second=0,
+                                                    microsecond=0)
         self.cumulative_performance.update_dividends(midnight_between)
         self.todays_performance.update_dividends(midnight_between)
 
@@ -329,14 +361,6 @@ class PerformanceTracker(object):
         When the simulation is complete, run the full period risk report
         and send it out on the results socket.
         """
-        # the stream will end on the last trading day, but will
-        # not trigger an end of day, so we trigger the final
-        # market close(s) here
-        perf_messages = []
-        while self.last_close > self.market_close:
-            perf_messages.append(self.handle_market_close())
-
-        perf_messages.append(self.handle_market_close())
 
         log_msg = "Simulated {n} trading days out of {m}."
         log.info(log_msg.format(n=int(self.day_count), m=self.total_days))
@@ -350,7 +374,7 @@ class PerformanceTracker(object):
         self.risk_report = risk.RiskReport(self.returns, self.sim_params)
 
         risk_dict = self.risk_report.to_dict()
-        return perf_messages, risk_dict
+        return risk_dict
 
 
 class Position(object):
@@ -411,9 +435,6 @@ class Position(object):
             self.cost_basis = total_cost / total_shares
             self.amount = self.amount + txn.amount
 
-    def currentValue(self):
-        return self.amount * self.last_sale_price
-
     def __repr__(self):
         template = "sid: {sid}, amount: {amount}, cost_basis: {cost_basis}, \
         last_sale_price: {last_sale_price}"
@@ -445,6 +466,7 @@ class PerformancePeriod(object):
             period_open=None,
             period_close=None,
             keep_transactions=True,
+            keep_orders=False,
             serialize_positions=True):
 
         self.period_open = period_open
@@ -453,14 +475,17 @@ class PerformancePeriod(object):
         self.ending_value = 0.0
         self.period_cash_flow = 0.0
         self.pnl = 0.0
-        #sid => position object
+        # sid => position object
         self.positions = positiondict()
         self.starting_value = 0.0
-        #cash balance at start of period
+        # cash balance at start of period
         self.starting_cash = starting_cash
         self.ending_cash = starting_cash
         self.keep_transactions = keep_transactions
-        self.processed_transactions = []
+        self.processed_transactions = defaultdict(list)
+        self.keep_orders = keep_orders
+        self.orders_by_modified = defaultdict(list)
+        self.orders_by_id = OrderedDict()
         self.cumulative_capital_used = 0.0
         self.max_capital_used = 0.0
         self.max_leverage = 0.0
@@ -485,7 +510,9 @@ class PerformancePeriod(object):
         self.starting_cash = self.ending_cash
         self.period_cash_flow = 0.0
         self.pnl = 0.0
-        self.processed_transactions = []
+        self.processed_transactions = defaultdict(list)
+        self.orders_by_modified = defaultdict(list)
+        self.orders_by_id = OrderedDict()
         self.cumulative_capital_used = 0.0
         self.max_capital_used = 0.0
         self.max_leverage = 0.0
@@ -545,6 +572,16 @@ class PerformancePeriod(object):
         else:
             self.returns = 0.0
 
+    def record_order(self, order):
+        if self.keep_orders:
+            self.orders_by_modified[order.dt].append(order)
+            # to preserve the order of the orders by modified date
+            # we delete and add back. (ordered dictionary is sorted by
+            # first insertion date).
+            if order.id in self.orders_by_id:
+                del self.orders_by_id[order.id]
+            self.orders_by_id[order.id] = order
+
     def execute_transaction(self, txn):
         # Update Position
         # ----------------
@@ -577,7 +614,7 @@ class PerformancePeriod(object):
 
         # add transaction to the list of processed transactions
         if self.keep_transactions:
-            self.processed_transactions.append(txn)
+            self.processed_transactions[txn.dt].append(txn)
 
     def round_to_nearest(self, x, base=5):
         return int(base * round(float(x) / base))
@@ -587,7 +624,9 @@ class PerformancePeriod(object):
 
     def update_last_sale(self, event):
         is_trade = event.type == zp.DATASOURCE_TYPE.TRADE
-        if event.sid in self.positions and is_trade:
+        has_price = not np.isnan(event.price)
+        # isnan check will keep the last price if its not present
+        if (event.sid in self.positions) and is_trade and has_price:
             self.positions[event.sid].last_sale_price = event.price
             index = self.index_for_position(event.sid)
             self._position_last_sale_prices[index] = event.price
@@ -615,10 +654,13 @@ class PerformancePeriod(object):
 
         return rval
 
-    def to_dict(self):
+    def to_dict(self, dt=None):
         """
         Creates a dictionary representing the state of this performance
         period. See header comments for a detailed description.
+
+        Kwargs:
+            dt (datetime): If present, only return transactions for the dt.
         """
         rval = self.__core_dict()
 
@@ -628,8 +670,24 @@ class PerformancePeriod(object):
 
         # we want the key to be absent, not just empty
         if self.keep_transactions:
-            transactions = [x.__dict__ for x in self.processed_transactions]
+            if dt:
+                # Only include transactions for given dt
+                transactions = [x.to_dict()
+                                for x in self.processed_transactions[dt]]
+            else:
+                transactions = \
+                    [y.to_dict()
+                     for x in self.processed_transactions.itervalues()
+                     for y in x]
             rval['transactions'] = transactions
+
+        if self.keep_orders:
+            if dt:
+                # only include orders modified as of the given dt.
+                orders = [x.to_dict() for x in self.orders_by_modified[dt]]
+            else:
+                orders = [x.to_dict() for x in self.orders_by_id.itervalues()]
+            rval['orders'] = orders
 
         return rval
 
