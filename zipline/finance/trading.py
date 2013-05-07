@@ -75,7 +75,8 @@ class TradingEnvironment(object):
         self,
         load=None,
         bm_symbol='^GSPC',
-        exchange_tz="US/Eastern"
+        exchange_tz="US/Eastern",
+        max_date=None
     ):
         self.prev_environment = self
         self.trading_day_map = OrderedDict()
@@ -87,6 +88,8 @@ class TradingEnvironment(object):
             load(self.bm_symbol)
 
         self.treasury_curves = pd.Series(treasury_curves_map)
+        if max_date:
+            self.treasury_curves = self.treasury_curves[:max_date]
 
         self._period_trading_days = None
         self._trading_days_series = None
@@ -94,6 +97,8 @@ class TradingEnvironment(object):
         self.exchange_tz = exchange_tz
 
         for bm in self.benchmark_returns:
+            if max_date and bm.date > max_date:
+                break
             self.trading_day_map[bm.date] = bm
 
         self.first_trading_day = next(self.trading_day_map.iterkeys())
@@ -299,11 +304,21 @@ class SimulationParameters(object):
         return len(self.trading_days)
 
     def __repr__(self):
-        return "%s(%r)" % (
-            self.__class__.__name__,
-            {'first_open': self.first_open,
-             'last_close': self.last_close
-             })
+        return """
+{class_name}(
+    period_start={period_start},
+    period_end={period_end},
+    capital_base={capital_base},
+    emission_rate={emission_rate},
+    first_open={first_open},
+    last_close={last_close})\
+""".format(class_name=self.__class__.__name__,
+           period_start=self.period_start,
+           period_end=self.period_end,
+           capital_base=self.capital_base,
+           emission_rate=self.emission_rate,
+           first_open=self.first_open,
+           last_close=self.last_close)
 
 
 class use_environment(object):

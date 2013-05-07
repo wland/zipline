@@ -54,9 +54,6 @@ class AlgorithmSimulator(object):
                                                   second=0,
                                                   microsecond=0)
 
-        self.perf_key = self.EMISSION_TO_PERF_KEY_MAP[
-            self.algo.perf_tracker.emission_rate]
-
         # ==============
         # Snapshot Setup
         # ==============
@@ -81,6 +78,11 @@ class AlgorithmSimulator(object):
             if not 'algo_dt' in record.extra:
                 record.extra['algo_dt'] = self.snapshot_dt
         self.processor = Processor(inject_algo_dt)
+
+    @property
+    def perf_key(self):
+        return self.EMISSION_TO_PERF_KEY_MAP[
+            self.algo.perf_tracker.emission_rate]
 
     def transform(self, stream_in):
         """
@@ -129,7 +131,7 @@ class AlgorithmSimulator(object):
                         if event.type == DATASOURCE_TYPE.BENCHMARK:
                             bm_updated = True
                         txns, orders = self.algo.blotter.process_trade(event)
-                        for data in chain([event], txns, orders):
+                        for data in chain(txns, orders, [event]):
                             self.algo.perf_tracker.process_event(data)
 
                     # Update our portfolio.
@@ -169,13 +171,8 @@ class AlgorithmSimulator(object):
                             yield daily_rollup
                             tp = self.algo.perf_tracker.todays_performance
                             tp.rollover()
-
                             if mkt_close < self.algo.perf_tracker.last_close:
-                                env = trading.environment
-                                _, mkt_close = \
-                                    env.next_open_and_close(
-                                        mkt_close
-                                    )
+                                mkt_close = self.get_next_close(mkt_close)
 
             risk_message = self.algo.perf_tracker.handle_simulation_end()
             yield risk_message
@@ -193,6 +190,12 @@ class AlgorithmSimulator(object):
             perf_message = self.algo.perf_tracker.to_dict()
             perf_message['intraday_perf']['recorded_vars'] = rvars
             return perf_message
+
+    def get_next_close(self, mkt_close):
+        if mkt_close >= trading.environment.last_trading_day:
+            return self.sim_params.last_close
+        else:
+            return trading.environment.next_open_and_close(mkt_close)[1]
 
     def update_universe(self, event):
         """
