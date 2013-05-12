@@ -19,12 +19,22 @@ import copy
 from zipline.transforms import BatchTransform
 
 
-def make_transform(talib_fn):
+def make_transform(talib_fn, name):
     """
     A factory for BatchTransforms based on TALIB abstract functions.
     """
+    # make class docstring
+    header = '\n#---- TA-Lib docs\n\n'
+    talib_docs = getattr(talib, talib_fn.info['name']).__doc__
+    divider1 = '\n#---- Default mapping (TA-Lib : Zipline)\n\n'
+    mappings = '\n'.join('        {0} : {1}'.format(k, v)
+                         for k, v in talib_fn.input_names.items())
+    divider2 = '\n\n#---- Zipline docs\n'
+    help_str = (header + talib_docs + divider1 + mappings
+                + divider2)
+
     class TALibTransform(BatchTransform):
-        """
+        __doc__ = help_str + """
         TA-Lib keyword arguments must be passed at initialization. For
         example, to construct a moving average with timeperiod of 5, pass
         "timeperiod=5" during initialization.
@@ -71,6 +81,7 @@ def make_transform(talib_fn):
 
         **kwargs : any arguments to be passed to the TA-Lib function.
         """
+
         def __init__(self,
                      sid,
                      close='price',
@@ -86,6 +97,11 @@ def make_transform(talib_fn):
                        'open': open,
                        'volume': volume,
                        'close': close}
+
+            # Rename window_length to timeperiod to conform with
+            # external batch_transform interface.
+            if 'window_length' in kwargs:
+                kwargs['timeperiod'] = kwargs['window_length']
 
             self.call_kwargs = kwargs
 
@@ -146,24 +162,13 @@ def make_transform(talib_fn):
                 func=zipline_wrapper,
                 sids=sid,
                 refresh_period=refresh_period,
-                window_length=max(1, self.lookback))
+                window_length=max(1, self.lookback + 1))
 
         def __repr__(self):
             return 'Zipline BatchTransform: {0}'.format(
                 self.talib_fn.info['name'])
 
-    # make class docstring
-    header = '\n#---- TA-Lib docs\n\n'
-    talib_docs = getattr(talib, talib_fn.info['name']).__doc__
-    divider1 = '\n#---- Default mapping (TA-Lib : Zipline)\n\n'
-    mappings = '\n'.join('        {0} : {1}'.format(k, v)
-                         for k, v in talib_fn.input_names.items())
-    divider2 = '\n\n#---- Zipline docs\n'
-    help_str = (header + talib_docs + divider1 + mappings
-                + divider2 + TALibTransform.__doc__)
-    # TODO: Properly set a __doc__ string.
-    TALibTransform.help_str = help_str
-
+    TALibTransform.__name__ = name
     #return class
     return TALibTransform
 
@@ -172,4 +177,4 @@ def make_transform(talib_fn):
 for name in talib.abstract.__all__:
     fn = getattr(talib.abstract, name)
     if name != 'Function':
-        locals()[name] = make_transform(fn)
+        locals()[name] = make_transform(fn, name)
