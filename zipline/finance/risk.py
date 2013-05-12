@@ -620,12 +620,13 @@ class RiskMetricsIterative(RiskMetricsBase):
 
     def download_benchmark(self, event):
         ''' Get the current value of the index associated with code '''
-        code = str(event.returns)
+        # 1002.0 why float64 ?
+        code = str(int(event))
         #FIXME Fake return while data module isn't reshaped
         #return 0.04
         assert code in datautils.Exchange
         bench_data = self.remote.fetch_equities_snapshot(datautils.Exchange[code]['index'])
-        assert bench_data
+        #assert bench_data
         #TODO Some check betwen received date and perc_return['trade_date_utc']
         return float(bench_data[datautils.Exchange[code]['index']]['change_pct'])
 
@@ -634,6 +635,12 @@ class RiskMetricsIterative(RiskMetricsBase):
         return self.algorithm_returns.index[-1]
 
     def update(self, dt, algorithm_returns, benchmark_returns):
+        #import ipdb; ipdb.set_trace()
+        #NOTE Should probably change before, when benchmark_returns is extracted
+        if benchmark_returns > 1000.0:
+            # More than 1000 of return is a fake, we're in live mode
+            # and need to retrieve current index value
+            benchmark_returns = self.download_benchmark(benchmark_returns)
         self.algorithm_returns_cont[dt] = algorithm_returns
         self.algorithm_returns = self.algorithm_returns_cont.valid()
 
