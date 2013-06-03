@@ -95,6 +95,7 @@ class TradingAlgorithm(object):
         self.registered_transforms = {}
         self.transforms = []
         self.sources = []
+        self.data_generator = DataFrameSource
 
         self._recorded_vars = {}
 
@@ -264,14 +265,14 @@ class TradingAlgorithm(object):
             # if DataFrame provided, wrap in DataFrameSource
             source = DataFrameSource(source)
         elif isinstance(source, dict):
-            #NOTE More like a hack before better understanding
-            # Live backtest only required informations stored in a dictionnary
-            assert 'stream_source' in source
-            if source['stream_source'] == 'forex':
-                from neuronquant.data.ziplinesources.live.forex import DataLiveSource
-            else:
-                from neuronquant.data.ziplinesources.live.equities import DataLiveSource
-            source = DataLiveSource(source)
+            # Custom data source, data is a dict-like descriptor
+            source = self.data_generator(source)
+            #assert 'stream_source' in source
+            #if source['stream_source'] == 'forex':
+                #from neuronquant.data.ziplinesources.live.forex import DataLiveSource
+            #else:
+                #from neuronquant.data.ziplinesources.live.equities import DataLiveSource
+            #source = DataLiveSource(source)
             #source = DataLiveSource(source, start=start, end=end)
         elif isinstance(source, pd.Panel):
             source = DataPanelSource(source)
@@ -440,3 +441,6 @@ class TradingAlgorithm(object):
         assert data_frequency in ('daily', 'minute')
         self.data_frequency = data_frequency
         self.annualizer = ANNUALIZER[self.data_frequency]
+
+    def set_data_generator(self, generator_class):
+        self.data_generator = generator_class
