@@ -18,7 +18,6 @@ import pytz
 import logbook
 import datetime
 
-from functools import wraps
 from delorean import Delorean
 import pandas as pd
 from pandas import DatetimeIndex
@@ -27,7 +26,7 @@ from collections import OrderedDict
 from zipline.data.loader import load_market_data
 
 
-log = logbook.Logger('Transaction Simulator')
+log = logbook.Logger('Trading')
 
 
 # The financial simulations in zipline depend on information
@@ -76,7 +75,8 @@ class TradingEnvironment(object):
         load=None,
         bm_symbol='^GSPC',
         exchange_tz="US/Eastern",
-        max_date=None
+        max_date=None,
+        extra_dates=None
     ):
         self.prev_environment = self
         self.trading_day_map = OrderedDict()
@@ -91,15 +91,24 @@ class TradingEnvironment(object):
         if max_date:
             self.treasury_curves = self.treasury_curves[:max_date]
 
-        self._period_trading_days = None
         self._trading_days_series = None
         self.full_trading_day = datetime.timedelta(hours=6, minutes=30)
         self.exchange_tz = exchange_tz
 
+        bm = None
         for bm in self.benchmark_returns:
             if max_date and bm.date > max_date:
                 break
             self.trading_day_map[bm.date] = bm
+
+        if bm and extra_dates:
+            last_day = next(reversed(self.trading_day_map))
+            for extra_date in extra_dates:
+                extra_date = extra_date.replace(hour=0, minute=0, second=0,
+                                                microsecond=0)
+                if extra_date not in self.trading_day_map:
+                    self.trading_day_map[extra_date] = \
+                        self.trading_day_map[last_day]
 
         self.first_trading_day = next(self.trading_day_map.iterkeys())
         self.last_trading_day = next(reversed(self.trading_day_map))
@@ -134,17 +143,6 @@ class TradingEnvironment(object):
     def exchange_dt_in_utc(self, dt):
         delorean = Delorean(dt, self.exchange_tz)
         return delorean.shift(pytz.utc.zone).datetime
-
-    @property
-    def period_trading_days(self):
-        if self._period_trading_days is None:
-            self._period_trading_days = []
-            for date in self.trading_day_map.iterkeys():
-                if date > self.period_end:
-                    break
-                if date >= self.period_start:
-                    self.period_trading_days.append(date)
-        return self._period_trading_days
 
     @property
     def trading_days(self):
@@ -320,18 +318,3 @@ class SimulationParameters(object):
            emission_rate=self.emission_rate,
            first_open=self.first_open,
            last_close=self.last_close)
-
-
-class use_environment(object):
-    """A decorator to wrap a method in a particular
-    trading environment."""
-
-    def __init__(self, environment):
-        self.env = environment
-
-    def __call__(self, func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            with self.env:
-                return func(*args, **kwargs)
-        return wrapper

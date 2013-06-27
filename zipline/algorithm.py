@@ -36,7 +36,7 @@ from zipline.utils.factory import create_simulation_parameters
 from zipline.transforms.utils import StatefulTransform
 from zipline.finance.slippage import (
     VolumeShareSlippage,
-    FixedSlippage,
+    SlippageModel,
     transact_partial
 )
 from zipline.finance.commission import PerShare, PerTrade
@@ -64,11 +64,13 @@ class TradingAlgorithm(object):
     A new algorithm could look like this:
     ```
     class MyAlgo(TradingAlgorithm):
-        def initialize(amount):
+        def initialize(self, sids, amount):
+            self.sids = sids
             self.amount = amount
 
-        def handle_data(data):
+        def handle_data(self, data):
             sid = self.sids[0]
+            amount = self.amount
             self.order(sid, amount)
     ```
     To then to run this algorithm:
@@ -416,7 +418,7 @@ class TradingAlgorithm(object):
         self.blotter.transact = transact
 
     def set_slippage(self, slippage):
-        if not isinstance(slippage, (VolumeShareSlippage, FixedSlippage)):
+        if not isinstance(slippage, SlippageModel):
             raise UnsupportedSlippageModel()
         if self.initialized:
             raise OverrideSlippagePostInit()

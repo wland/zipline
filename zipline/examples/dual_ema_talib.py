@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #
 # Copyright 2013 Quantopian, Inc.
 #
@@ -89,4 +89,4 @@ if __name__ == '__main__':
     ax2.plot(results.ix[results.sell].index, results.short_ema[results.sell],
              'v', markersize=10, color='k')
     plt.legend(loc=0)
-    plt.show()
+    plt.gcf().set_size_inches(18, 8)
