@@ -12,8 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import itertools
-from itertools import chain
 from logbook import Logger, Processor
 
 import zipline.finance.trading as trading
@@ -66,7 +64,6 @@ class AlgorithmSimulator(object):
         # We don't have a datetime for the current snapshot until we
         # receive a message.
         self.simulation_dt = None
-        self.snapshot_dt = None
 
         # =============
         # Logging Setup
@@ -76,7 +73,7 @@ class AlgorithmSimulator(object):
         # user prints/logs.
         def inject_algo_dt(record):
             if not 'algo_dt' in record.extra:
-                record.extra['algo_dt'] = self.snapshot_dt
+                record.extra['algo_dt'] = self.simulation_dt
         self.processor = Processor(inject_algo_dt)
 
     @property
@@ -90,14 +87,6 @@ class AlgorithmSimulator(object):
         """
         # Initialize the mkt_close
         mkt_close = self.algo.perf_tracker.market_close
-        # Set the simulation date to be the first event we see.
-        peek_date, peek_snapshot = next(stream_in)
-        self.simulation_dt = peek_date
-
-        # Stitch back together the generator by placing the peeked
-        # event back in front
-        stream = itertools.chain([(peek_date, peek_snapshot)],
-                                 stream_in)
 
         # inject the current algo
         # snapshot time to any log record generated.
@@ -105,10 +94,11 @@ class AlgorithmSimulator(object):
 
             updated = False
             bm_updated = False
-            for date, snapshot in stream:
+            for date, snapshot in stream_in:
                 #!! Personal update
                 #self.algo.frame_count += 1
-
+                self.algo.set_datetime(date)
+                self.simulation_dt = date
                 self.algo.perf_tracker.set_date(date)
                 self.algo.blotter.set_date(date)
                 # If we're still in the warmup period.  Use the event to
@@ -131,9 +121,12 @@ class AlgorithmSimulator(object):
                         if event.type == DATASOURCE_TYPE.BENCHMARK:
                             self.algo.set_datetime(event.dt)
                             bm_updated = True
-                        txns, orders = self.algo.blotter.process_trade(event)
-                        for data in chain(txns, orders, [event]):
-                            self.algo.perf_tracker.process_event(data)
+
+                        process_trade = self.algo.blotter.process_trade
+                        for txn, order in process_trade(event):
+                            self.algo.perf_tracker.process_event(txn)
+                            self.algo.perf_tracker.process_event(order)
+                        self.algo.perf_tracker.process_event(event)
 
                     # Update our portfolio.
                     self.algo.set_portfolio(
@@ -143,7 +136,7 @@ class AlgorithmSimulator(object):
                     # Send the current state of the universe
                     # to the user's algo.
                     if updated:
-                        self.simulate_snapshot(date)
+                        self.algo.handle_data(self.current_data)
                         updated = False
 
                         # run orders placed in the algorithm call
@@ -173,7 +166,10 @@ class AlgorithmSimulator(object):
                             tp = self.algo.perf_tracker.todays_performance
                             tp.rollover()
                             if mkt_close < self.algo.perf_tracker.last_close:
-                                mkt_close = self.get_next_close(mkt_close)
+                                _, mkt_close = \
+                                    trading.environment.next_open_and_close(
+                                        mkt_close
+                                    )
                                 self.algo.perf_tracker.handle_intraday_close()
 
             risk_message = self.algo.perf_tracker.handle_simulation_end()
@@ -193,12 +189,6 @@ class AlgorithmSimulator(object):
             perf_message['minute_perf']['recorded_vars'] = rvars
             return perf_message
 
-    def get_next_close(self, mkt_close):
-        if mkt_close >= trading.environment.last_trading_day:
-            return self.sim_params.last_close
-        else:
-            return trading.environment.next_open_and_close(mkt_close)[1]
-
     def update_universe(self, event):
         """
         Update the universe with new event information.
@@ -206,16 +196,3 @@ class AlgorithmSimulator(object):
         # Update our knowledge of this event's sid
         sid_data = self.current_data[event.sid]
         sid_data.__dict__.update(event.__dict__)
-
-    def simulate_snapshot(self, date):
-        """
-        Run the user's algo against our current snapshot and update
-        the algo's simulated time.
-        """
-        # Needs to be set so that we inject the proper date into algo
-        # log/print lines.
-        self.snapshot_dt = date
-        self.algo.set_datetime(self.snapshot_dt)
-        # Update the simulation time.
-        self.simulation_dt = date
-        self.algo.handle_data(self.current_data)

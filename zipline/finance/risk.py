@@ -319,7 +319,6 @@ class RiskMetricsBase(object):
                 x.date <= returns[-1].date
             ]
 
-        self.runonce = True
         self.algorithm_returns = self.mask_returns_to_period(returns)
         self.benchmark_returns = self.mask_returns_to_period(benchmark_returns)
         self.calculate_metrics()
@@ -348,7 +347,6 @@ class RiskMetricsBase(object):
         except:
             #import ipdb; ipdb.set_trace()
             print 'No report can be produced, probably because of live mode'
-        self.runonce = False
 
         self.num_trading_days = len(self.benchmark_returns)
         self.benchmark_volatility = self.calculate_volatility(

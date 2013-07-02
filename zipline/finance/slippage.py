@@ -12,15 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import pytz
+from __future__ import division
+
+import abc
+
 import math
 
 from copy import copy
 from functools import partial
 from zipline.protocol import DATASOURCE_TYPE
 import zipline.utils.math_utils as zp_math
-
-from logbook import Processor
 
 
 def check_order_triggers(order, event):
@@ -61,25 +62,17 @@ def transact_stub(slippage, commission, event, open_orders):
     This is intended to be wrapped in a partial, so that the
     slippage and commission models can be enclosed.
     """
-    def inject_algo_dt(record):
-        if not 'algo_dt' in record.extra:
-            record.extra['algo_dt'] = event['dt']
-
-    with Processor(inject_algo_dt).threadbound():
-
-        transactions = slippage.simulate(event, open_orders)
-
-        for transaction in transactions:
-            if (
-                transaction
-                and not
-                zp_math.tolerant_equals(transaction.amount, 0)
-            ):
-                direction = math.copysign(1, transaction.amount)
-                per_share, total_commission = commission.calculate(transaction)
-                transaction.price = transaction.price + (per_share * direction)
-                transaction.commission = total_commission
-        return transactions
+    for order, transaction in slippage(event, open_orders):
+        if (
+            transaction
+            and not
+            zp_math.tolerant_equals(transaction.amount, 0)
+        ):
+            direction = math.copysign(1, transaction.amount)
+            per_share, total_commission = commission.calculate(transaction)
+            transaction.price = transaction.price + (per_share * direction)
+            transaction.commission = total_commission
+        yield order, transaction
 
 
 def transact_partial(slippage, commission):
@@ -106,21 +99,66 @@ class Transaction(object):
         return py
 
 
-def create_transaction(sid, amount, price, dt, order_id):
+def create_transaction(event, order, price, amount):
+
+    # floor the amount to protect against non-whole number orders
+    # TODO: Investigate whether we can add a robust check in blotter
+    # and/or tradesimulation, as well.
+    amount_magnitude = int(abs(amount))
+
+    if amount_magnitude < 1:
+        raise Exception("Transaction magnitude must be at least 1.")
 
     txn = {
-        'sid': sid,
+        'sid': event.sid,
         'amount': int(amount),
-        'dt': dt,
+        'dt': event.dt,
         'price': price,
-        'order_id': order_id
+        'order_id': order.id
     }
 
     transaction = Transaction(**txn)
     return transaction
 
 
-class VolumeShareSlippage(object):
+class SlippageModel(object):
+
+    __metaclass__ = abc.ABCMeta
+
+    @property
+    def volume_for_bar(self):
+        return self._volume_for_bar
+
+    @abc.abstractproperty
+    def process_order(self, event, order):
+        pass
+
+    def simulate(self, event, current_orders):
+
+        self._volume_for_bar = 0
+
+        for order in current_orders:
+
+            open_amount = order.amount - order.filled
+
+            if zp_math.tolerant_equals(open_amount, 0):
+                continue
+
+            order.check_triggers(event)
+            if not order.triggered:
+                continue
+
+            txn = self.process_order(event, order)
+
+            if txn:
+                self._volume_for_bar += abs(txn.amount)
+                yield order, txn
+
+    def __call__(self, event, current_orders, **kwargs):
+        return self.simulate(event, current_orders, **kwargs)
+
+
+class VolumeShareSlippage(SlippageModel):
 
     def __init__(self,
                  volume_limit=.25,
@@ -138,67 +176,46 @@ class VolumeShareSlippage(object):
                    volume_limit=self.volume_limit,
                    price_impact=self.price_impact)
 
-    def simulate(self, event, current_orders):
+    def process_order(self, event, order):
 
-        dt = event.dt
-        simulated_impact = 0.0
         max_volume = self.volume_limit * event.volume
-        total_volume = 0
 
-        txns = []
-        for order in current_orders:
+        # price impact accounts for the total volume of transactions
+        # created against the current minute bar
+        remaining_volume = max_volume - self.volume_for_bar
+        if remaining_volume < 1:
+            # we can't fill any more transactions
+            return
 
-            open_amount = order.amount - order.filled
+        # the current order amount will be the min of the
+        # volume available in the bar or the open amount.
+        cur_volume = int(min(remaining_volume, abs(order.open_amount)))
 
-            if zp_math.tolerant_equals(open_amount, 0):
-                continue
+        if cur_volume < 1:
+            return
 
-            order.check_triggers(event)
-            if not order.triggered:
-                continue
+        # tally the current amount into our total amount ordered.
+        # total amount will be used to calculate price impact
+        total_volume = self.volume_for_bar + cur_volume
 
-            # price impact accounts for the total volume of transactions
-            # created against the current minute bar
-            remaining_volume = max_volume - total_volume
-            if (
-                remaining_volume <= 0
-                or
-                zp_math.tolerant_equals(remaining_volume, 0)
-            ):
-                # we can't fill any more transactions
-                return txns
+        volume_share = min(total_volume / event.volume,
+                           self.volume_limit)
 
-            # the current order amount will be the min of the
-            # volume available in the bar or the open amount.
-            cur_amount = min(remaining_volume, abs(open_amount))
-            cur_amount = cur_amount * order.direction
-            # tally the current amount into our total amount ordered.
-            # total amount will be used to calculate price impact
-            total_volume = total_volume + order.direction * cur_amount
+        simulated_impact = (volume_share) ** 2 \
+            * math.copysign(self.price_impact, order.direction) \
+            * event.price
 
-            volume_share = min(order.direction * (total_volume) / event.volume,
-                               self.volume_limit)
-
-            simulated_impact = (volume_share) ** 2 \
-                * self.price_impact * order.direction * event.price
-
-            if order.direction * cur_amount > 0:
-                txn = create_transaction(
-                    event.sid,
-                    cur_amount,
-                    # In the future, we may want to change the next line
-                    # for limit pricing
-                    event.price + simulated_impact,
-                    dt.replace(tzinfo=pytz.utc),
-                    order.id
-                )
-
-                txns.append(txn)
-
-        return txns
+        return create_transaction(
+            event,
+            order,
+            # In the future, we may want to change the next line
+            # for limit pricing
+            event.price + simulated_impact,
+            math.copysign(cur_volume, order.direction)
+        )
 
 
-class FixedSlippage(object):
+class FixedSlippage(SlippageModel):
 
     def __init__(self, spread=0.0):
         """
@@ -208,30 +225,10 @@ class FixedSlippage(object):
         """
         self.spread = spread
 
-    def simulate(self, event, orders):
-
-        txns = []
-        for order in orders:
-            # TODO: what if we have 2 orders, one for 100 shares long,
-            # and one for 100 shares short
-            # such as in a hedging scenario?
-
-            order.check_triggers(event)
-            if not order.triggered:
-                continue
-
-            if zp_math.tolerant_equals(order.amount, 0):
-                return txns
-
-            txn = create_transaction(
-                event.sid,
-                order.amount,
-                event.price + (self.spread / 2.0 * order.direction),
-                event.dt.replace(tzinfo=pytz.utc),
-                order.id
-            )
-
-            # mark the date of the order to match the transaction
-            order.dt = event.dt
-            txns.append(txn)
-        return txns
+    def process_order(self, event, order):
+        return create_transaction(
+            event,
+            order,
+            event.price + (self.spread / 2.0 * order.direction),
+            order.amount,
+        )

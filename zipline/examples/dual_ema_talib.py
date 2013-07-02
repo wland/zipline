@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #
 # Copyright 2013 Quantopian, Inc.
 #
@@ -38,8 +38,8 @@ class DualEMATaLib(TradingAlgorithm):
     def initialize(self, short_window=20, long_window=40):
         # Add 2 mavg transforms, one with a long window, one
         # with a short window.
-        self.short_ema_trans = EMA('AAPL', window_length=short_window)
-        self.long_ema_trans = EMA('AAPL', window_length=long_window)
+        self.short_ema_trans = EMA(window_length=short_window)
+        self.long_ema_trans = EMA(window_length=long_window)
 
         # To keep track of whether we invested in the stock or not
         self.invested = False
@@ -89,4 +89,4 @@ if __name__ == '__main__':
     ax2.plot(results.ix[results.sell].index, results.short_ema[results.sell],
              'v', markersize=10, color='k')
     plt.legend(loc=0)
-    plt.show()
+    plt.gcf().set_size_inches(18, 8)

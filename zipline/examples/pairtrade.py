@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #
 # Copyright 2013 Quantopian, Inc.
 #
@@ -95,8 +95,8 @@ class Pairtrade(TradingAlgorithm):
             self.order('KO', -int(100 / data['KO'].price))
             self.invested = True
         elif zscore <= -2.0 and not self.invested:
-            self.order('KO', -int(100 / data['KO'].price))
-            self.order('PEP', int(100 / data['PEP'].price))
+            self.order('PEP', -int(100 / data['PEP'].price))
+            self.order('KO', int(100 / data['KO'].price))
             self.invested = True
         elif abs(zscore) < .5 and self.invested:
             self.sell_spread()
@@ -131,4 +131,4 @@ if __name__ == '__main__':
     results.zscores.plot(ax=ax2, color='r')
     plt.ylabel('zscored spread')
 
-    plt.show()
+    plt.gcf().set_size_inches(18, 8)
