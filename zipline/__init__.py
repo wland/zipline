@@ -6,12 +6,12 @@ Zipline
 # it is a place to expose the public interfaces.
 
 
-import data
-import finance
-import gens
-import utils
+from . import data
+from . import finance
+from . import gens
+from . import utils
 
-from algorithm import TradingAlgorithm
+from . algorithm import TradingAlgorithm
 
 __all__ = [
     'data',
