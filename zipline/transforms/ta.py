@@ -56,8 +56,7 @@ def make_transform(talib_fn, name):
         --------
 
         A moving average of a data column called 'Oil' with timeperiod 5,
-        for sid 'XYZ':
-            talib.transforms.ta.MA('XYZ', close='Oil', timeperiod=5)
+            talib.transforms.ta.MA(close='Oil', timeperiod=5)
 
         The user could find the default arguments and mappings by calling:
             help(zipline.transforms.ta.MA)
@@ -65,8 +64,6 @@ def make_transform(talib_fn, name):
 
         Arguments
         ---------
-
-        sid : zipline sid
 
         open   : string, default 'open'
         high   : string, default 'high'
@@ -83,7 +80,6 @@ def make_transform(talib_fn, name):
         """
 
         def __init__(self,
-                     sid,
                      close='price',
                      open='open',
                      high='high',
@@ -98,10 +94,10 @@ def make_transform(talib_fn, name):
                        'volume': volume,
                        'close': close}
 
-            # Rename window_length to timeperiod to conform with
-            # external batch_transform interface.
-            if 'window_length' in kwargs:
-                kwargs['timeperiod'] = kwargs['window_length']
+            # Rename timeperiod to window_length to conform with
+            # TALib interface.
+            if 'timeperiod' in kwargs:
+                kwargs['window_length'] = kwargs['timeperiod']
 
             self.call_kwargs = kwargs
 
@@ -160,7 +156,6 @@ def make_transform(talib_fn, name):
 
             super(TALibTransform, self).__init__(
                 func=zipline_wrapper,
-                sids=sid,
                 refresh_period=refresh_period,
                 window_length=max(1, self.lookback + 1))
 
@@ -174,7 +169,6 @@ def make_transform(talib_fn, name):
 
 
 # add all TA-Lib functions to locals
-for name in talib.abstract.__all__:
+for name in talib.abstract.__FUNCTION_NAMES:
     fn = getattr(talib.abstract, name)
-    if name != 'Function':
-        locals()[name] = make_transform(fn, name)
+    locals()[name] = make_transform(fn, name)
